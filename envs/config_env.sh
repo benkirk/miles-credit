@@ -226,24 +226,43 @@ __ce_build_env() {
     #-------------------------------------------------------
     # host-specific post-install steps
     if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
-        # install hwloc via conda; it is a dependency for aws-ofi-nccl
-        conda install \
-              --yes \
-              -c conda-forge \
-              libhwloc=*=*cuda* cuda-version=12.9
 
-        # Set environment variables for dependencies
-        OFI_HOME=/opt/cray/libfabric/1.22.0
-        AWS_OFI_PLUGIN_HOME=${CONDA_PREFIX}
-        HWLOC_PREFIX=${CONDA_PREFIX}
-        AWS_OFI_NCCL_VERSION="v1.19.2"
+        # hwloc supplies the build headers for aws-ofi-nccl.  Install it (plus
+        # pkg-config, so build-aws-ofi-nccl-plugin.sh can find it via the conda
+        # lib/pkgconfig/hwloc.pc) ONLY when the system/module environment lacks
+        # the dev headers; otherwise we build/link against the system hwloc.
+        # The probe runs HERE, after modules are loaded, in the real build env.
+        if { command -v pkg-config >/dev/null 2>&1 && pkg-config --exists hwloc 2>/dev/null; } \
+           || printf '#include <hwloc.h>\n' | ${CC:-cc} -E -x c - >/dev/null 2>&1; then
+            echo "config_env.sh: system/module hwloc dev found; not installing conda hwloc."
+        else
+            echo "config_env.sh: no system hwloc.h; installing CUDA-aware hwloc + pkg-config from conda-forge."
+            # CONDA_OVERRIDE_CUDA lets the cuda129 build resolve on a driverless
+            # login node, where conda's __cuda virtual package is otherwise absent.
+            CONDA_OVERRIDE_CUDA="12.9" conda install \
+                  --yes \
+                  -c conda-forge \
+                  "libhwloc=*=cuda129*" cuda-version=12.9 pkg-config || {
+                echo "config_env.sh: hwloc/pkg-config install failed." >&2
+                return 1
+            }
+        fi
 
-        # Build the OFI Plugin
-        ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh
+        # Build the OFI Plugin (it makes its own hwloc prefix/rpath decision).
+        # Fail loudly: a broken plugin must NOT report success.
+        export AWS_OFI_NCCL_VERSION="v1.19.2"
+        ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh || {
+            echo "config_env.sh: aws-ofi-nccl plugin build failed." >&2
+            return 1
+        }
 
-        # install the env var hooks:
-        cp -r ${SCRIPTDIR}/activate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/activate.d/nccl-hpe-cxi.sh
-        cp -r ${SCRIPTDIR}/deactivate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/deactivate.d/nccl-hpe-cxi.sh
+        # install the env var hooks (the deactivate.d dir may not exist yet):
+        mkdir -p ${CONDA_PREFIX}/etc/conda/activate.d ${CONDA_PREFIX}/etc/conda/deactivate.d \
+            && cp ${SCRIPTDIR}/activate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/activate.d/nccl-hpe-cxi.sh \
+            && cp ${SCRIPTDIR}/deactivate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/deactivate.d/nccl-hpe-cxi.sh || {
+            echo "config_env.sh: failed to install NCCL activate/deactivate hooks." >&2
+            return 1
+        }
     fi
 
     #-------------------------------------------------------
