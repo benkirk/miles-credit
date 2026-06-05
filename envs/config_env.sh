@@ -160,12 +160,14 @@ __ce_ensure_conda() {
         return 1
     }
 
-    # Initialize conda if not already initialized
-    if [ -z "${CONDA_SHLVL}" ]; then
-        CONDA_ROOT=$(conda info --base 2>/dev/null)
-        if [ -n "${CONDA_ROOT}" ] && [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
-            source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-        fi
+    # `conda activate` is a SHELL FUNCTION defined by conda.sh -- not the
+    # `conda` PATH binary -- and it is NOT inherited by an EXECUTED (non-sourced)
+    # script, even though CONDA_SHLVL may be exported (e.g. "0") from the parent.
+    # So we cannot gate on CONDA_SHLVL; source conda.sh unconditionally (it is
+    # idempotent) to make `conda activate` work in THIS process.
+    CONDA_ROOT=$(conda info --base 2>/dev/null)
+    if [ -n "${CONDA_ROOT}" ] && [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
+        source "${CONDA_ROOT}/etc/profile.d/conda.sh"
     fi
 }
 
@@ -284,7 +286,7 @@ __ce_build_env() {
 # NOTE: when adding a new function/var above, add its name here too.
 __ce_cleanup() {
     unset VERBOSE REBUILD TARGET_HOST ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
-          __CE_USE_MODULES __CE_CUDA_MODULE NEEDS_OFI_PLUGIN \
+          __CE_USE_MODULES __CE_CUDA_MODULE NEEDS_OFI_PLUGIN CONDA_ROOT \
           __ce_show_help __ce_bad_arg __ce_arg __ce_status 2>/dev/null
     unset -f __ce_usage run_quiet __ce_parse_args __ce_host_config __ce_setup_modules \
              __ce_ensure_conda __ce_maybe_rebuild __ce_activate_if_exists __ce_build_env \
