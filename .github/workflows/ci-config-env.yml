@@ -197,19 +197,15 @@ jobs:
           test -d envs/credit-env || { echo "FAIL: env missing after rebuild"; exit 1; }
           echo "OK: rebuild"
 
-      - name: "Inspect built environment (conda-tree, pipdeptree)"
+      - name: "Inspect built environment (pipdeptree)"
         run: |
-          # CI-only dependency introspection. These tools are deliberately NOT
-          # in config_env.sh or pyproject.toml. conda-tree is installed in BASE
-          # and pointed at the env prefix (-p), so it does NOT pull conda into
-          # credit-env and pollute the trees; pipdeptree is pip-only and runs
-          # inside the env via `conda run`.
+          # CI-only dependency introspection. pipdeptree is pip-only and
+          # lightweight; it runs inside the env via `conda run`. Deliberately
+          # NOT added to config_env.sh or pyproject.toml -- the env is kept
+          # intentionally minimal. (conda-tree is avoided on purpose: it pulls
+          # conda into the env, which defeats that minimality.)
           env_prefix="$GITHUB_WORKSPACE/envs/credit-env"
-          conda install -n base --yes -c conda-forge conda-tree
           conda run -p "$env_prefix" pip install pipdeptree
-          echo "::group::conda-tree deptree --small"
-          conda-tree -p "$env_prefix" deptree --small
-          echo "::endgroup::"
           echo "::group::pipdeptree --depth 3"
           conda run --no-capture-output -p "$env_prefix" pipdeptree --depth 3
           echo "::endgroup::"
