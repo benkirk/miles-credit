@@ -200,16 +200,16 @@ jobs:
       - name: "Inspect built environment (conda-tree, pipdeptree)"
         run: |
           # CI-only dependency introspection. These tools are deliberately NOT
-          # in config_env.sh or pyproject.toml -- they are installed here, into
-          # the freshly built env, purely to dump its dependency trees.
-          base=$(conda info --base)
-          source "$base/etc/profile.d/conda.sh"   # defines `conda activate`
-          conda activate "$GITHUB_WORKSPACE/envs/credit-env"
-          conda install --yes -c conda-forge conda-tree
-          pip install pipdeptree
+          # in config_env.sh or pyproject.toml. conda-tree is installed in BASE
+          # and pointed at the env prefix (-p), so it does NOT pull conda into
+          # credit-env and pollute the trees; pipdeptree is pip-only and runs
+          # inside the env via `conda run`.
+          env_prefix="$GITHUB_WORKSPACE/envs/credit-env"
+          conda install -n base --yes -c conda-forge conda-tree
+          conda run -p "$env_prefix" pip install pipdeptree
           echo "::group::conda-tree deptree --small"
-          conda-tree deptree --small
+          conda-tree -p "$env_prefix" deptree --small
           echo "::endgroup::"
           echo "::group::pipdeptree --depth 3"
-          pipdeptree --depth 3
+          conda run --no-capture-output -p "$env_prefix" pipdeptree --depth 3
           echo "::endgroup::"
