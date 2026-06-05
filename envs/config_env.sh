@@ -208,7 +208,7 @@ export PIP_NO_BINARY="mpi4py"
 case "${TARGET_HOST}" in
 
     "default")
-        pip install -e ".[]" ${pip_extra_args}
+        pip install -e "." ${pip_extra_args}
         ;;
 
     "casper")
