@@ -196,3 +196,20 @@ jobs:
             || { echo "FAIL: expected 'Rebuild requested'"; exit 1; }
           test -d envs/credit-env || { echo "FAIL: env missing after rebuild"; exit 1; }
           echo "OK: rebuild"
+
+      - name: "Inspect built environment (conda-tree, pipdeptree)"
+        run: |
+          # CI-only dependency introspection. These tools are deliberately NOT
+          # in config_env.sh or pyproject.toml -- they are installed here, into
+          # the freshly built env, purely to dump its dependency trees.
+          base=$(conda info --base)
+          source "$base/etc/profile.d/conda.sh"   # defines `conda activate`
+          conda activate "$GITHUB_WORKSPACE/envs/credit-env"
+          conda install --yes -c conda-forge conda-tree
+          pip install pipdeptree
+          echo "::group::conda-tree deptree --small"
+          conda-tree deptree --small
+          echo "::endgroup::"
+          echo "::group::pipdeptree --depth 3"
+          pipdeptree --depth 3
+          echo "::endgroup::"
