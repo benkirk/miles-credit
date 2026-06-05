@@ -1,0 +1,211 @@
+name: CI config_env
+
+# Exercises envs/config_env.sh across OS/arch and shells. The script's contract
+# is: dual-mode (runnable OR sourceable), bash + zsh, idempotent activate, smart
+# --rebuild, and ZERO shell-state pollution when sourced. We run the script
+# exactly as-is (no script changes); the heavy `full-build` legs report reality,
+# so they may be red where the scientific stack (pygrib/eccodes) or the GPU-only
+# torch.cuda.nccl check cannot succeed on a CPU runner.
+#
+# The `matrix` context is NOT permitted in a step's `shell:` field, so every
+# step runs under `shell: bash` and we invoke the shell-under-test from inside
+# the run block (matrix IS allowed there):
+#   - execute mode -> `<shell> envs/config_env.sh ...` (a child process; the
+#     bash shebang is bypassed so the matrix shell genuinely parses the script).
+#   - source mode  -> write the body to a temp script and run `<shell> body.sh`,
+#     which sources config_env.sh; sourced-mode detection fires in both shells.
+# The temp scripts deliberately run WITHOUT `set -e`: config_env.sh is meant to
+# be sourced into a normal (no -e) shell (e.g. `run_quiet module try-load conda`
+# returns 127 on a non-module host), so -e would spuriously abort it.
+
+on:
+  pull_request:
+    branches: [staging, main]
+    paths:
+      - 'envs/**'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # setup-miniconda (v3.3.0) ships on Node 20; opt into Node 24 now to silence
+  # the runner deprecation warning (Node 20 is removed from runners 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Fast, deterministic, conda-free. The --help / bad-arg / syntax / source
+  # paths all return before __ce_ensure_conda is ever reached, so these need no
+  # conda and give a stable green signal independent of the scientific stack.
+  # --------------------------------------------------------------------------
+  contract:
+    name: contract / ${{ matrix.os }} / ${{ matrix.shell }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        shell: [bash, zsh]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zsh (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Syntax check (bash -n and zsh -n)
+        run: |
+          bash -n envs/config_env.sh
+          zsh  -n envs/config_env.sh
+
+      - name: "--help (execute under ${{ matrix.shell }})"
+        run: |
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh --help 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: --help rc=$rc (want 0)"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Usage:' || { echo "FAIL: no usage text"; exit 1; }
+          echo "OK: --help"
+
+      - name: "Bad argument (execute under ${{ matrix.shell }})"
+        run: |
+          # help/bad-arg map to status 2 -> the driver returns/exits 0.
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh --bogus 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: bad-arg rc=$rc (want 0, mapped)"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'unknown argument' \
+            || { echo "FAIL: no 'unknown argument' message"; exit 1; }
+          echo "OK: bad argument"
+
+      - name: "Source + dual-mode + no shell pollution (${{ matrix.shell }})"
+        run: |
+          # --help returns before any build/conda work, so this isolates the
+          # sourceable dual-mode + cleanup contract from the heavy build.
+          cat > "$RUNNER_TEMP/src_help.sh" <<'EOF'
+          source envs/config_env.sh --help; rc=$?
+          [ "$rc" -eq 0 ] || { echo "FAIL: source --help rc=$rc (want 0)"; exit 1; }
+          # No helper FUNCTIONS may survive in the caller shell.
+          for fn in __ce_run __ce_cleanup __ce_host_config __ce_ensure_conda run_quiet; do
+            if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
+          done
+          # No helper VARIABLES may survive (${VAR+set} is a set-test, bash & zsh).
+          for v in CONDA_ROOT VERBOSE REBUILD TARGET_HOST ENV_NAME ENV_DIR __ce_status; do
+            eval "probe=\${$v+set}"
+            if [ "${probe:-}" = set ]; then echo "FAIL: leaked variable: $v"; exit 1; fi
+          done
+          echo "OK: dual-mode source leaves no residue"
+          EOF
+          ${{ matrix.shell }} "$RUNNER_TEMP/src_help.sh"
+
+  # --------------------------------------------------------------------------
+  # Heavy: builds the real environment and exercises the runtime permutations
+  # (fresh build, idempotent activate, source-activate, --rebuild). Honest by
+  # design: a leg goes red wherever the real build cannot complete.
+  # --------------------------------------------------------------------------
+  full-build:
+    name: build / ${{ matrix.os }} / ${{ matrix.shell }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        shell: [bash, zsh]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zsh (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Set up conda (Miniforge)
+        uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3.3.0
+        with:
+          miniforge-version: latest
+          auto-activate: true
+          activate-environment: base
+          conda-remove-defaults: true
+
+      - name: Put conda on PATH for every shell
+        shell: bash -el {0}
+        run: |
+          base=$(conda info --base)
+          echo "$base/condabin" >> "$GITHUB_PATH"
+          echo "$base/bin"      >> "$GITHUB_PATH"
+
+      - name: "Execute: fresh build (${{ matrix.shell }})"
+        run: |
+          if ! ${{ matrix.shell }} envs/config_env.sh; then
+            echo "FAIL: fresh build returned non-zero"; exit 1
+          fi
+          test -d envs/credit-env || { echo "FAIL: envs/credit-env not created"; exit 1; }
+          echo "OK: fresh build"
+
+      - name: "Execute: idempotent activate (no rebuild)"
+        run: |
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: re-run rc=$rc"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Activating' \
+            || { echo "FAIL: expected 'Activating' (activate short-circuit)"; exit 1; }
+          if printf '%s\n' "$out" | grep -q 'successfully installed'; then
+            echo "FAIL: rebuilt instead of activating an existing env"; exit 1
+          fi
+          echo "OK: idempotent activate"
+
+      - name: "Source: activate, CONDA_PREFIX, no pollution (${{ matrix.shell }})"
+        run: |
+          cat > "$RUNNER_TEMP/src_activate.sh" <<'EOF'
+          source envs/config_env.sh; rc=$?
+          [ "$rc" -eq 0 ] || { echo "FAIL: source rc=$rc"; exit 1; }
+          case "$CONDA_PREFIX" in
+            */envs/credit-env) echo "OK: CONDA_PREFIX=$CONDA_PREFIX" ;;
+            *) echo "FAIL: CONDA_PREFIX not the env: '$CONDA_PREFIX'"; exit 1 ;;
+          esac
+          for fn in __ce_run __ce_cleanup run_quiet; do
+            if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
+          done
+          echo "OK: source-activate leaves no residue"
+          EOF
+          ${{ matrix.shell }} "$RUNNER_TEMP/src_activate.sh"
+
+      - name: "Execute: rebuild (-r)"
+        run: |
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh -r 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: rebuild rc=$rc"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Rebuild requested' \
+            || { echo "FAIL: expected 'Rebuild requested'"; exit 1; }
+          test -d envs/credit-env || { echo "FAIL: env missing after rebuild"; exit 1; }
+          echo "OK: rebuild"
+
+      - name: "Inspect built environment (pipdeptree)"
+        run: |
+          # CI-only dependency introspection. pipdeptree is pip-only and
+          # lightweight; it runs inside the env via `conda run`. Deliberately
+          # NOT added to config_env.sh or pyproject.toml -- the env is kept
+          # intentionally minimal. (conda-tree is avoided on purpose: it pulls
+          # conda into the env, which defeats that minimality.)
+          env_prefix="$GITHUB_WORKSPACE/envs/credit-env"
+          conda run -p "$env_prefix" pip install pipdeptree
+          echo "::group::pipdeptree --depth 3"
+          conda run --no-capture-output -p "$env_prefix" pipdeptree --depth 3
+          echo "::endgroup::"

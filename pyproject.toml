@@ -68,6 +68,10 @@ ptype = ["metpy",
 ask    = ["anthropic>=0.40", "groq>=0.9", "openai>=1.0", "google-generativeai>=0.8"]
 agent  = ["anthropic>=0.40"]
 
+# requires e.g. pip install -e ".[ncar-hpc]" --extra-index-url https://download.pytorch.org/whl/cu129
+ncar-hpc-casper = ["torch==2.10.0+cu126", "mpi4py>=4.0"]
+ncar-hpc-derecho = ["torch==2.10.0+cu129", "mpi4py>=4.0"]
+
 [tool.setuptools]
 
 packages = ["credit.applications", "credit", "credit.models", "credit.models.wxformer", "credit.metadata", "credit.datasets",
@@ -119,4 +123,3 @@ convention = "google"
 
 [tool.pytest.ini_options]
 addopts = "--continue-on-collection-errors"
-
