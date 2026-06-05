@@ -24,6 +24,7 @@ on:
     paths:
       - 'envs/**'
       - 'pyproject.toml'
+      - '.github/workflows/ci-config-env.yml'
   workflow_dispatch:
 
 permissions:
@@ -208,4 +209,21 @@ jobs:
           conda run -p "$env_prefix" pip install pipdeptree
           echo "::group::pipdeptree --depth 3"
           conda run --no-capture-output -p "$env_prefix" pipdeptree --depth 3
+          echo "::endgroup::"
+
+      - name: "Run test suite (pytest)"
+        env:
+          # Skip the tests that reach real AWS S3 (HRRR remote fetch) so the
+          # suite stays hermetic and non-flaky on CI runners. Multi-GPU/NCCL
+          # tests self-skip on CPU (torch.cuda.device_count() < 2).
+          SKIP_HRRR_REMOTE: "1"
+        run: |
+          # CI-only test tooling, mirroring the pipdeptree step above: pytest is
+          # installed INTO the built env at CI time via `conda run`, NOT added to
+          # config_env.sh or pyproject.toml -- the env is kept intentionally
+          # minimal. Coverage is deliberately not collected.
+          env_prefix="$GITHUB_WORKSPACE/envs/credit-env"
+          conda run -p "$env_prefix" pip install pytest
+          echo "::group::pytest tests/"
+          conda run --no-capture-output -p "$env_prefix" pytest tests/
           echo "::endgroup::"
