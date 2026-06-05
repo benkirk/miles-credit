@@ -79,6 +79,29 @@ Force a clean rebuild, or watch the setup in detail:
 Re-running is cheap: if the environment already exists the script just
 activates it and returns immediately.
 
+## Continuous integration
+
+`config_env.sh` is exercised in CI by
+[`.github/workflows/ci-config-env.yml`](../.github/workflows/ci-config-env.yml),
+which runs on pull requests into `staging`/`main` that touch `envs/**` or
+`pyproject.toml` (and on manual dispatch). The matrix covers Linux x86_64,
+Linux arm64, and macOS arm64, each under **both `bash` and `zsh`**:
+
+- **contract** (fast, no conda): `bash -n`/`zsh -n`, `--help`, unknown-argument
+  handling, and the sourceable dual-mode + **no-shell-pollution** guarantee.
+- **full build**: a real `--rebuild`, then idempotent activate and
+  source-activate, plus a post-install health check (`probe_installed_env.py`)
+  that imports `torch`/`credit` and reports the CUDA/NCCL state.
+
+**Rule — keep the environment minimal.** The environment is the runtime users
+source on laptops and HPC, so CI/diagnostic tooling must **not** be added to
+`config_env.sh` or `pyproject.toml`. Any such tooling is installed *in the
+workflow* against the already-built env (e.g. `pipdeptree` via
+`conda run -p <prefix> pip install pipdeptree`). NCCL follows the same spirit:
+optional in general (CPU/macOS builds have none), but **required on the GPU/HPC
+hosts that cannot run on free CI** (Casper, Derecho) via the probe's
+`--require-nccl`.
+
 ## NOTES
 
 ### `derecho` — NCCL, Cray Slingshot, and the AWS OFI Plugin
