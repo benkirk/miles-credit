@@ -94,6 +94,9 @@ __ce_parse_args() {
 #                      identical in bash and zsh)
 #   __CE_USE_MODULES - 0/1 (run the module dance?)
 #   NEEDS_OFI_PLUGIN - 0/1 (derecho-only post-build steps)
+#   __CE_EXPECT_NCCL - 0/1 (is NCCL expected here? -> health check requires it.
+#                      NCCL is optional in general but expected on the GPU/HPC
+#                      hosts we cannot exercise on free CI: casper, derecho)
 #
 # ADDING A HOST = add ONE case arm here.  Both the module-setup phase and the
 # pip/build phase read from this function, so nothing else needs editing.
@@ -106,6 +109,7 @@ __ce_host_config() {
     __CE_CUDA_MODULE=""
     __CE_USE_MODULES=0
     NEEDS_OFI_PLUGIN=0
+    __CE_EXPECT_NCCL=0
 
     case "${TARGET_HOST}" in
 
@@ -118,6 +122,7 @@ __ce_host_config() {
             __CE_USE_MODULES=1
             PIP_EXTRA_URL="https://download.pytorch.org/whl/cu126"
             PIP_TARGET_SPEC=".[ncar-hpc-${NCAR_HOST}]"
+            __CE_EXPECT_NCCL=1
             ;;
 
         "derecho")
@@ -127,6 +132,7 @@ __ce_host_config() {
             PIP_EXTRA_URL="https://download.pytorch.org/whl/cu129"
             PIP_TARGET_SPEC=".[ncar-hpc-${NCAR_HOST}]"
             NEEDS_OFI_PLUGIN=1
+            __CE_EXPECT_NCCL=1
             ;;
 
         *)
@@ -210,19 +216,32 @@ __ce_build_env() {
     conda create \
           --yes \
           --prefix "${ENV_DIR}" \
-          python=3.11
+          python=3.11 || {
+        echo "config_env.sh: 'conda create' failed." >&2
+        return 1
+    }
 
-    conda activate "${ENV_DIR}"
+    conda activate "${ENV_DIR}" || {
+        echo "config_env.sh: 'conda activate ${ENV_DIR}' failed." >&2
+        return 1
+    }
 
     #-------------------------------------------------------
     # install via pip, forcing a source build of mpi4py with host compilers.
     # PIP_EXTRA_URL is passed as two explicit args only when set, so this is
     # correct under both bash and zsh (no word-splitting reliance).
+    # Fail loudly: a failed pip install must NOT fall through to "success".
     export PIP_NO_BINARY="mpi4py"
     if [ -n "${PIP_EXTRA_URL}" ]; then
-        pip install -e "${PIP_TARGET_SPEC}" --extra-index-url "${PIP_EXTRA_URL}"
+        pip install -e "${PIP_TARGET_SPEC}" --extra-index-url "${PIP_EXTRA_URL}" || {
+            echo "config_env.sh: 'pip install' failed." >&2
+            return 1
+        }
     else
-        pip install -e "${PIP_TARGET_SPEC}"
+        pip install -e "${PIP_TARGET_SPEC}" || {
+            echo "config_env.sh: 'pip install' failed." >&2
+            return 1
+        }
     fi
 
     #-------------------------------------------------------
@@ -268,10 +287,18 @@ __ce_build_env() {
     fi
 
     #-------------------------------------------------------
-    # query installed packages
-    python -c "import torch; print('torch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print(torch.__config__.show())"
-    python -c "import torch; print('nccl version:', torch.cuda.nccl.version())"
-    python -c "import credit"
+    # post-install health check: queries the torch build (version/CUDA/NCCL),
+    # reports NCCL only when present, and confirms `import credit` works.
+    # NCCL is required only where we expect it (casper/derecho).  Build the
+    # arg list via `set --` (a function-local positional list) so expansion is
+    # identical under bash and zsh -- no unquoted word-splitting.
+    set -- "${SCRIPTDIR}/probe_installed_env.py"
+    [ "${__CE_EXPECT_NCCL}" -eq 1 ] && set -- "$@" "--require-nccl"
+    [ "${VERBOSE}" -eq 1 ]          && set -- "$@" "--verbose"
+    python "$@" || {
+        echo "config_env.sh: environment health check failed." >&2
+        return 1
+    }
 
     #-------------------------------------------------------
     # report success
@@ -286,7 +313,7 @@ __ce_build_env() {
 # NOTE: when adding a new function/var above, add its name here too.
 __ce_cleanup() {
     unset VERBOSE REBUILD TARGET_HOST ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
-          __CE_USE_MODULES __CE_CUDA_MODULE NEEDS_OFI_PLUGIN CONDA_ROOT \
+          __CE_USE_MODULES __CE_CUDA_MODULE NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL CONDA_ROOT \
           __ce_show_help __ce_bad_arg __ce_arg __ce_status 2>/dev/null
     unset -f __ce_usage run_quiet __ce_parse_args __ce_host_config __ce_setup_modules \
              __ce_ensure_conda __ce_maybe_rebuild __ce_activate_if_exists __ce_build_env \
