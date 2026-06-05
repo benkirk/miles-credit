@@ -30,11 +30,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # setup-miniconda (v3.3.0) ships on Node 20; opt into Node 24 now to silence
-  # the runner deprecation warning (Node 20 is removed from runners 2026-09-16).
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -134,7 +129,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zsh
 
       - name: Set up conda (Miniforge)
-        uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3.3.0
+        uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
           miniforge-version: latest
           auto-activate: true
