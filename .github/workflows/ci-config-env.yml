@@ -1,0 +1,183 @@
+name: CI config_env
+
+# Exercises envs/config_env.sh across OS/arch and shells. The script's contract
+# is: dual-mode (runnable OR sourceable), bash + zsh, idempotent activate, smart
+# --rebuild, and ZERO shell-state pollution when sourced. We run the script
+# exactly as-is (no script changes); the heavy `full-build` legs report reality,
+# so they may be red where the scientific stack (pygrib/eccodes) or the GPU-only
+# torch.cuda.nccl check cannot succeed on a CPU runner.
+#
+# NOTE: test steps use `shell: <shell> {0}` (NOT the GitHub builtin `bash`,
+# which injects `set -e`). config_env.sh is not written to run under `set -e`
+# (e.g. `run_quiet module try-load conda` returns 127 on a non-module host), so
+# sourcing it under `-e` would spuriously abort. We assert exit codes ourselves.
+
+on:
+  pull_request:
+    branches: [staging, main]
+    paths:
+      - 'envs/**'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Fast, deterministic, conda-free. The --help / bad-arg / syntax / source
+  # paths all return before __ce_ensure_conda is ever reached, so these need no
+  # conda and give a stable green signal regardless of the scientific stack.
+  # --------------------------------------------------------------------------
+  contract:
+    name: contract / ${{ matrix.os }} / ${{ matrix.shell }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        shell: [bash, zsh]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zsh (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Syntax check (bash -n and zsh -n)
+        shell: bash
+        run: |
+          bash -n envs/config_env.sh
+          zsh  -n envs/config_env.sh
+
+      - name: "--help (execute under ${{ matrix.shell }})"
+        shell: ${{ matrix.shell }} {0}
+        run: |
+          out=$(${{ matrix.shell }} envs/config_env.sh --help 2>&1); rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: --help rc=$rc (want 0)"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Usage:' || { echo "FAIL: no usage text"; exit 1; }
+          echo "OK: --help"
+
+      - name: "Bad argument (execute under ${{ matrix.shell }})"
+        shell: ${{ matrix.shell }} {0}
+        run: |
+          # help/bad-arg map to status 2 -> the driver returns/exits 0.
+          out=$(${{ matrix.shell }} envs/config_env.sh --bogus 2>&1); rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: bad-arg rc=$rc (want 0, mapped)"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'unknown argument' \
+            || { echo "FAIL: no 'unknown argument' message"; exit 1; }
+          echo "OK: bad argument"
+
+      - name: "Source + dual-mode + no shell pollution (${{ matrix.shell }})"
+        shell: ${{ matrix.shell }} {0}
+        run: |
+          # --help returns before any build/conda work, so this isolates the
+          # sourceable-dual-mode + cleanup contract from the heavy build.
+          source envs/config_env.sh --help; rc=$?
+          [ "$rc" -eq 0 ] || { echo "FAIL: source --help rc=$rc (want 0)"; exit 1; }
+          # No helper FUNCTIONS may survive in the caller shell.
+          for fn in __ce_run __ce_cleanup __ce_host_config __ce_ensure_conda run_quiet; do
+            if command -v "$fn" >/dev/null 2>&1; then
+              echo "FAIL: leaked function: $fn"; exit 1
+            fi
+          done
+          # No helper VARIABLES may survive (${VAR+set} is set-test, bash & zsh).
+          for v in CONDA_ROOT VERBOSE REBUILD TARGET_HOST ENV_NAME ENV_DIR __ce_status; do
+            eval "probe=\${$v+set}"
+            if [ "${probe:-}" = set ]; then echo "FAIL: leaked variable: $v"; exit 1; fi
+          done
+          echo "OK: dual-mode source leaves no residue"
+
+  # --------------------------------------------------------------------------
+  # Heavy: builds the real environment and exercises the runtime permutations
+  # (fresh build, idempotent activate, source-activate, --rebuild). Honest by
+  # design: a leg goes red wherever the real build cannot complete.
+  # --------------------------------------------------------------------------
+  full-build:
+    name: build / ${{ matrix.os }} / ${{ matrix.shell }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        shell: [bash, zsh]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zsh (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Set up conda (Miniforge)
+        uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3.3.0
+        with:
+          miniforge-version: latest
+          auto-activate-base: true
+          activate-environment: ""
+
+      - name: Put conda on PATH for every shell
+        shell: bash -el {0}
+        run: |
+          base=$(conda info --base)
+          echo "$base/condabin" >> "$GITHUB_PATH"
+          echo "$base/bin"      >> "$GITHUB_PATH"
+
+      - name: "Execute: fresh build (${{ matrix.shell }})"
+        shell: ${{ matrix.shell }} {0}
+        run: |
+          ${{ matrix.shell }} envs/config_env.sh; rc=$?
+          [ "$rc" -eq 0 ] || { echo "FAIL: fresh build rc=$rc"; exit 1; }
+          test -d envs/credit-env || { echo "FAIL: envs/credit-env not created"; exit 1; }
+          echo "OK: fresh build"
+
+      - name: "Execute: idempotent activate (no rebuild)"
+        shell: ${{ matrix.shell }} {0}
+        run: |
+          out=$(${{ matrix.shell }} envs/config_env.sh 2>&1); rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: re-run rc=$rc"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Activating' \
+            || { echo "FAIL: expected 'Activating' (short-circuit)"; exit 1; }
+          if printf '%s\n' "$out" | grep -q 'successfully installed'; then
+            echo "FAIL: rebuilt instead of activating an existing env"; exit 1
+          fi
+          echo "OK: idempotent activate"
+
+      - name: "Source: activate, CONDA_PREFIX, no pollution (${{ matrix.shell }})"
+        shell: ${{ matrix.shell }} {0}
+        run: |
+          source envs/config_env.sh; rc=$?
+          [ "$rc" -eq 0 ] || { echo "FAIL: source rc=$rc"; exit 1; }
+          case "$CONDA_PREFIX" in
+            */envs/credit-env) echo "OK: CONDA_PREFIX=$CONDA_PREFIX" ;;
+            *) echo "FAIL: CONDA_PREFIX not the env: '$CONDA_PREFIX'"; exit 1 ;;
+          esac
+          for fn in __ce_run __ce_cleanup run_quiet; do
+            if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
+          done
+          echo "OK: source-activate leaves no residue"
+
+      - name: "Execute: rebuild (-r)"
+        shell: ${{ matrix.shell }} {0}
+        run: |
+          out=$(${{ matrix.shell }} envs/config_env.sh -r 2>&1); rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: rebuild rc=$rc"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Rebuild requested' \
+            || { echo "FAIL: expected 'Rebuild requested'"; exit 1; }
+          test -d envs/credit-env || { echo "FAIL: env missing after rebuild"; exit 1; }
+          echo "OK: rebuild"
