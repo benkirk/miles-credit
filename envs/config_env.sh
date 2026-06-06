@@ -2,8 +2,8 @@
 
 
 #----------------------------------------------------------------------------
-# Unified script to create and initialize a CREDIT conda-based environment
-# across systems.
+# Unified script to create and initialize a CREDIT Python environment
+# (conda by default, or uv via --uv) across systems.
 #
 # This script is intended to be idempotent and both sourceable or runnable.
 #
@@ -37,9 +37,13 @@ SCRIPTDIR="$(realpath "$(dirname "$(realpath "${SCRIPT_PATH}")")")"
 #----------------------------------------------------------------------------
 __ce_usage() {
     cat <<USAGE
-Usage: [source] config_env.sh [--verbose] [--rebuild] [--help]
+Usage: [source] config_env.sh [--uv] [--verbose] [--rebuild] [--help]
 
-  --verbose, -v   Show module/conda setup output (quiet by default).
+  --uv            Use the 'uv' package installer and a uv-managed venv instead
+                  of conda.  Supported on the 'default' and 'casper' hosts;
+                  'derecho' is conda-only.  uv must already be on PATH (or
+                  available as a module); it is not bootstrapped for you.
+  --verbose, -v   Show module/backend setup output (quiet by default).
   --rebuild, -r   Rebuild the environment even if it already exists.
                   The existing env is moved aside and removed in the
                   background, then a fresh env is built.
@@ -68,10 +72,12 @@ run_quiet() {
 __ce_parse_args() {
     VERBOSE=0
     REBUILD=0
+    BACKEND="conda"
     __ce_show_help=0
     __ce_bad_arg=""
     for __ce_arg in "$@"; do
         case "${__ce_arg}" in
+            --uv)         BACKEND="uv" ;;
             --verbose|-v) VERBOSE=1 ;;
             --rebuild|-r) REBUILD=1 ;;
             --help|-h)    __ce_show_help=1 ;;
@@ -100,8 +106,8 @@ __ce_parse_args() {
 #
 # ADDING A HOST = add ONE case arm here.  Both the module-setup phase and the
 # pip/build phase read from this function, so nothing else needs editing.
-# (If a future host needs a module set unlike gcc/conda[/cuda], branch in
-# __ce_setup_modules -- the one other host-aware spot.)
+# (If a future host needs a module set unlike "gcc + <backend> [+ cuda]",
+# branch in __ce_setup_modules -- the one other host-aware spot.)
 __ce_host_config() {
     ENV_NAME="credit-env"
     PIP_EXTRA_URL=""
@@ -140,6 +146,10 @@ __ce_host_config() {
             ;;
     esac
 
+    # Give the uv env its own prefix so a uv build and a conda build can coexist
+    # and the per-backend existence tests never cross-detect one another.
+    [ "${BACKEND}" = "uv" ] && ENV_NAME="${ENV_NAME}-uv"
+
     ENV_DIR="${SCRIPTDIR}/${ENV_NAME}"
 }
 
@@ -152,8 +162,35 @@ __ce_setup_modules() {
     run_quiet module --force purge
     run_quiet module load ncarenv/25.10
     run_quiet module reset
-    run_quiet module load gcc/14.3.0 conda ${__CE_CUDA_MODULE}   # <=1 token: portable
+    run_quiet module load gcc/14.3.0 ${__CE_CUDA_MODULE}   # <=1 extra token: portable
+    # Load ONLY the backend tool's module.  On Casper the conda and uv modules
+    # conflict, so we never load both; ${BACKEND} is "conda" or "uv".
+    run_quiet module load "${BACKEND}"
     run_quiet module list
+}
+
+#----------------------------------------------------------------------------
+# Locate the selected backend (conda or uv) and initialize it if needed.
+# Returns 1 if the backend tool cannot be found.
+__ce_ensure_backend() {
+    if [ "${BACKEND}" = "uv" ]; then
+        __ce_ensure_uv
+    else
+        __ce_ensure_conda
+    fi
+}
+
+#----------------------------------------------------------------------------
+# Locate uv (it comes from a module on Casper, or is already on PATH on a
+# default host).  Per project policy uv is NOT bootstrapped here; if it cannot
+# be found we stop with guidance.  Returns 1 if uv is unavailable.
+__ce_ensure_uv() {
+    run_quiet module try-load uv
+    uv --version >/dev/null 2>&1 || {
+        echo "config_env.sh: cannot locate uv." >&2
+        echo "                Install it (https://docs.astral.sh/uv/) or 'module load uv', then re-run." >&2
+        return 1
+    }
 }
 
 #----------------------------------------------------------------------------
@@ -203,46 +240,72 @@ __ce_maybe_rebuild() {
 # Activate the environment if it already exists.  Returns 0 (activated) so the
 # caller can short-circuit, or 1 if there is nothing to activate.
 __ce_activate_if_exists() {
-    [ -d "${ENV_DIR}" ] || return 1
-    echo "Activating ${ENV_DIR}"
-    conda activate "${ENV_DIR}"   # side effect propagates to the caller's shell
+    if [ "${BACKEND}" = "uv" ]; then
+        [ -f "${ENV_DIR}/bin/activate" ] || return 1
+        echo "Activating ${ENV_DIR}"
+        source "${ENV_DIR}/bin/activate"   # side effect propagates to the caller
+    else
+        [ -d "${ENV_DIR}" ] || return 1
+        echo "Activating ${ENV_DIR}"
+        conda activate "${ENV_DIR}"   # side effect propagates to the caller's shell
+    fi
 }
 
 #----------------------------------------------------------------------------
 # Build the environment from scratch (we only get here when ENV_DIR is absent).
 __ce_build_env() {
     #-------------------------------------------------------
-    # create minimal conda environment
-    conda create \
-          --yes \
-          --prefix "${ENV_DIR}" \
-          python=3.11 || {
-        echo "config_env.sh: 'conda create' failed." >&2
-        return 1
-    }
-
-    conda activate "${ENV_DIR}" || {
-        echo "config_env.sh: 'conda activate ${ENV_DIR}' failed." >&2
-        return 1
-    }
-
-    #-------------------------------------------------------
-    # install via pip, forcing a source build of mpi4py with host compilers.
-    # PIP_EXTRA_URL is passed as two explicit args only when set, so this is
-    # correct under both bash and zsh (no word-splitting reliance).
-    # Fail loudly: a failed pip install must NOT fall through to "success".
-    export PIP_NO_BINARY="mpi4py"
-    if [ -n "${PIP_EXTRA_URL}" ]; then
-        pip install -e "${PIP_TARGET_SPEC}" --extra-index-url "${PIP_EXTRA_URL}" || {
-            echo "config_env.sh: 'pip install' failed." >&2
+    # create a minimal isolated environment with a controlled Python (3.11)
+    if [ "${BACKEND}" = "uv" ]; then
+        # Force a uv-managed standalone CPython (--managed-python) so the venv
+        # never adopts an interpreter the caller's shell merely happens to
+        # expose -- e.g. an active conda env (CONDA_PREFIX) or a system
+        # python3.11 on PATH -- whose lifecycle we do not control.  Without it,
+        # uv symlinks the venv's python at that external interpreter, which then
+        # dangles if it is later rebuilt or removed (breaking the uv env and the
+        # conda/uv "coexistence" guarantee).
+        uv venv --managed-python --python 3.11 "${ENV_DIR}" || {
+            echo "config_env.sh: 'uv venv' failed." >&2
+            return 1
+        }
+        source "${ENV_DIR}/bin/activate" || {
+            echo "config_env.sh: activating uv venv '${ENV_DIR}' failed." >&2
             return 1
         }
     else
-        pip install -e "${PIP_TARGET_SPEC}" || {
-            echo "config_env.sh: 'pip install' failed." >&2
+        conda create \
+              --yes \
+              --prefix "${ENV_DIR}" \
+              python=3.11 || {
+            echo "config_env.sh: 'conda create' failed." >&2
+            return 1
+        }
+
+        conda activate "${ENV_DIR}" || {
+            echo "config_env.sh: 'conda activate ${ENV_DIR}' failed." >&2
             return 1
         }
     fi
+
+    #-------------------------------------------------------
+    # install the Python stack, forcing a source build of mpi4py with the host
+    # compilers.  Build the command via `set --` (a function-local positional
+    # list) so expansion is identical under bash and zsh -- no unquoted
+    # word-splitting -- and the extra-index URL is appended as two explicit
+    # args only when set.  uv has its OWN no-binary flag; it does NOT honor
+    # pip's PIP_NO_BINARY.  Fail loudly: a failed install must NOT fall through
+    # to "success".
+    if [ "${BACKEND}" = "uv" ]; then
+        set -- uv pip install --no-binary mpi4py -e "${PIP_TARGET_SPEC}"
+    else
+        export PIP_NO_BINARY="mpi4py"
+        set -- pip install -e "${PIP_TARGET_SPEC}"
+    fi
+    [ -n "${PIP_EXTRA_URL}" ] && set -- "$@" --extra-index-url "${PIP_EXTRA_URL}"
+    "$@" || {
+        echo "config_env.sh: package install failed." >&2
+        return 1
+    }
 
     #-------------------------------------------------------
     # host-specific post-install steps
@@ -303,8 +366,13 @@ __ce_build_env() {
     #-------------------------------------------------------
     # report success
     echo
-    echo "\"${ENV_NAME}\" conda environment for ${TARGET_HOST} successfully installed into ${CONDA_PREFIX}"
-    echo "use \"conda activate ${ENV_DIR}\" to activate"
+    if [ "${BACKEND}" = "uv" ]; then
+        echo "\"${ENV_NAME}\" uv environment for ${TARGET_HOST} successfully installed into ${VIRTUAL_ENV}"
+        echo "use \"source ${ENV_DIR}/bin/activate\" to activate"
+    else
+        echo "\"${ENV_NAME}\" conda environment for ${TARGET_HOST} successfully installed into ${CONDA_PREFIX}"
+        echo "use \"conda activate ${ENV_DIR}\" to activate"
+    fi
 }
 
 #----------------------------------------------------------------------------
@@ -312,12 +380,12 @@ __ce_build_env() {
 # here would otherwise persist in the caller's interactive shell).
 # NOTE: when adding a new function/var above, add its name here too.
 __ce_cleanup() {
-    unset VERBOSE REBUILD TARGET_HOST ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
+    unset VERBOSE REBUILD BACKEND TARGET_HOST ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
           __CE_USE_MODULES __CE_CUDA_MODULE NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL CONDA_ROOT \
           __ce_show_help __ce_bad_arg __ce_arg __ce_status 2>/dev/null
     unset -f __ce_usage run_quiet __ce_parse_args __ce_host_config __ce_setup_modules \
-             __ce_ensure_conda __ce_maybe_rebuild __ce_activate_if_exists __ce_build_env \
-             __ce_run 2>/dev/null
+             __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
+             __ce_activate_if_exists __ce_build_env __ce_run 2>/dev/null
     unset -f __ce_cleanup 2>/dev/null   # self-unset LAST
     return "${1:-0}"                    # propagate the status passed in
 }
@@ -340,11 +408,20 @@ __ce_run() {
     fi
 
     TARGET_HOST="${NCAR_HOST:-default}"
+
+    # Scope guard: the uv backend cannot supply the non-Python build deps
+    # (libhwloc/pkg-config) or the conda activate.d NCCL hooks that derecho
+    # requires, so --uv is supported on default/casper only.
+    if [ "${BACKEND}" = "uv" ] && [ "${TARGET_HOST}" = "derecho" ]; then
+        echo "config_env.sh: --uv is not supported on derecho; use the conda backend." >&2
+        return 1
+    fi
+
     __ce_host_config
     __ce_setup_modules
 
-    __ce_ensure_conda  || return 1
-    __ce_maybe_rebuild || return 1
+    __ce_ensure_backend || return 1
+    __ce_maybe_rebuild  || return 1
 
     # Activate if it exists (and we did not just remove it for rebuild).
     if __ce_activate_if_exists; then
