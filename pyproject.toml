@@ -68,9 +68,13 @@ ptype = ["metpy",
 ask    = ["anthropic>=0.40", "groq>=0.9", "openai>=1.0", "google-generativeai>=0.8"]
 agent  = ["anthropic>=0.40"]
 
-# requires e.g. pip install -e ".[ncar-hpc]" --extra-index-url https://download.pytorch.org/whl/cu129
-ncar-hpc-casper = ["torch==2.10.0+cu126", "mpi4py>=4.0"]
-ncar-hpc-derecho = ["torch==2.10.0+cu129", "mpi4py>=4.0"]
+# Distributed (MPI) extra.  Signifies only the mpi4py dependency: the torch
+# build and its CUDA variant are selected at install time by envs/config_env.sh
+# via --torch-version/--cuda-version (pinned on the pip line with a matching
+# --extra-index-url), so they are intentionally NOT pinned here.  This replaces
+# the former per-host ncar-hpc-{casper,derecho} extras, whose only difference
+# was the torch CUDA build.
+distributed = ["mpi4py>=4.0"]
 
 [tool.setuptools]
 

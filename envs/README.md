@@ -31,17 +31,21 @@ name: `credit-env-py3.11`, `credit-env-casper-py3.11`, or
   No modules are loaded and no host-specific extras are installed.
 
 - **`casper`** — loads `ncarenv/25.10`, `gcc/14.3.0`, and `conda`, then
-  installs `.[ncar-hpc-casper]` against the CUDA 12.6 PyTorch index
-  (`torch==2.10.0+cu126`). `mpi4py` is built from source with the host
-  compilers (`PIP_NO_BINARY=mpi4py`).
+  installs `.[distributed]` (the `mpi4py` extra) with `torch==2.10.0+cu126`
+  pinned on the pip line against the CUDA 12.6 PyTorch index (the default CUDA
+  for this host; override with `--cuda-version`). `mpi4py` is built from source
+  with the host compilers (`PIP_NO_BINARY=mpi4py`).
 
 - **`derecho`** — as `casper`, plus the `cuda` module and the CUDA 12.9 PyTorch
-  index (`torch==2.10.0+cu129`). Additionally builds the **AWS OFI NCCL
-  plugin** and installs NCCL/Slingshot activation hooks — see
-  [NOTES](#derecho--nccl-cray-slingshot-and-the-aws-ofi-plugin).
+  index (`torch==2.10.0+cu129`, the default CUDA for this host). Additionally
+  builds the **AWS OFI NCCL plugin** and installs NCCL/Slingshot activation
+  hooks — see [NOTES](#derecho--nccl-cray-slingshot-and-the-aws-ofi-plugin).
 
-The `ncar-hpc-*` extras are defined under `[project.optional-dependencies]` in
-the repository `pyproject.toml`.
+The single `distributed` extra is defined under `[project.optional-dependencies]`
+in the repository `pyproject.toml`; it carries only `mpi4py`. The torch version
+and its CUDA build are **not** pinned in `pyproject.toml` — they are selected at
+install time via `--torch-version`/`--cuda-version` (which is why one extra now
+serves both `casper` and `derecho`).
 
 ### Options
 
@@ -51,7 +55,9 @@ These work identically whether the script is sourced or executed:
 | ----------------- | ---------------------------------------------------------------------- |
 | `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on all hosts (`default`/`casper`/`derecho`). |
 | `--python-version X.Y` | Python version to build with (default `3.11`). Always encoded into the prefix (e.g. `credit-env-py3.12`), so versions coexist. Accepts `--python-version 3.12` or `--python-version=3.12`. |
-| `--verbose`, `-v` | Show module/backend setup output (suppressed by default).              |
+| `--torch-version X.Y.Z` | torch version pinned on the pip line for CUDA-enabled hosts (default `2.10.0`). Combined with `--cuda-version` into `torch==<ver>+cu<tag>`. Accepts the `=` form too. |
+| `--cuda-version X.Y` | CUDA build of torch, e.g. `12.6` → the `cu126` PyTorch wheels + matching `--extra-index-url`. Defaults per host (`casper` 12.6, `derecho` 12.9); on `default` it opts into a CUDA build (otherwise plain torch from PyPI). |
+| `--verbose`, `-v` | Show module/backend setup output (suppressed by default). Also echoes the assembled `pip install` command. |
 | `--rebuild`, `-r` | Rebuild even if the environment exists. The old prefix is moved aside and removed in the background, then a fresh environment is built. |
 | `--help`, `-h`    | Print usage and stop.                                                  |
 

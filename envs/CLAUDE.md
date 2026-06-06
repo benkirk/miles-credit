@@ -32,7 +32,8 @@ Inter-file contract (the part to hold in your head):
   *function* isn't inherited) and re-derives host policy by sourcing
   `host_config.sh` + calling `__ce_host_config` (agreement with the parent by
   construction, not via a fragile export list). The parent passes only `BACKEND`,
-  `VERBOSE`, and `PYTHON_VERSION`; `NCAR_HOST` is already in the environment.
+  `VERBOSE`, `PYTHON_VERSION`, `TORCH_VERSION`, and `CUDA_VERSION`; `NCAR_HOST` is
+  already in the environment.
 - `create_env.sh`'s own `conda activate`/venv-activate during the build is local
   and discarded — that's why the parent **always** activates afterward (a single
   activation path for both build-vs-already-exists).
@@ -85,6 +86,18 @@ script is sourced into interactive shells and PBS run scripts):
   external interpreter and dangles when that is rebuilt/removed. Don't drop this flag.
 - `mpi4py` is always a source build: conda path via `PIP_NO_BINARY=mpi4py`; uv
   path via uv's own `--no-binary mpi4py` (uv ignores `PIP_NO_BINARY`).
+- **torch/CUDA is pinned at install time, not in `pyproject.toml`.** The CUDA
+  hosts install the single `.[distributed]` extra (just `mpi4py`); the torch
+  build is appended to the pip line as `__CE_TORCH_SPEC` (`torch==<ver>+cu<tag>`)
+  with a matching `PIP_EXTRA_URL`, both built in `__ce_host_config` from
+  `--torch-version`/`--cuda-version`. CUDA version resolves CLI > per-host default
+  (`__CE_DEFAULT_CUDA`, e.g. derecho 12.9) > global default (12.6); torch
+  defaults to a global 2.10.0. The `default` host gets a CUDA build only if the
+  user passes `--cuda-version`. This is what let the old per-host
+  `ncar-hpc-{casper,derecho}` extras collapse into one. `--verbose` echoes the
+  fully expanded pip command (the line is assembled dynamically). Neither version
+  is encoded in the prefix — two CUDA variants share a prefix; use `--rebuild` to
+  switch an existing env.
 
 ## derecho / OFI plugin (the `NEEDS_OFI_PLUGIN` path)
 
