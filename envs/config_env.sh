@@ -257,8 +257,14 @@ __ce_build_env() {
     #-------------------------------------------------------
     # create a minimal isolated environment with a controlled Python (3.11)
     if [ "${BACKEND}" = "uv" ]; then
-        # uv provisions a managed CPython 3.11 if one is not already present.
-        uv venv --python 3.11 "${ENV_DIR}" || {
+        # Force a uv-managed standalone CPython (--managed-python) so the venv
+        # never adopts an interpreter the caller's shell merely happens to
+        # expose -- e.g. an active conda env (CONDA_PREFIX) or a system
+        # python3.11 on PATH -- whose lifecycle we do not control.  Without it,
+        # uv symlinks the venv's python at that external interpreter, which then
+        # dangles if it is later rebuilt or removed (breaking the uv env and the
+        # conda/uv "coexistence" guarantee).
+        uv venv --managed-python --python 3.11 "${ENV_DIR}" || {
             echo "config_env.sh: 'uv venv' failed." >&2
             return 1
         }
