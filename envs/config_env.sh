@@ -40,9 +40,9 @@ __ce_usage() {
 Usage: [source] config_env.sh [--uv] [--verbose] [--rebuild] [--help]
 
   --uv            Use the 'uv' package installer and a uv-managed venv instead
-                  of conda.  Supported on the 'default' and 'casper' hosts;
-                  'derecho' is conda-only.  uv must already be on PATH (or
-                  available as a module); it is not bootstrapped for you.
+                  of conda.  Supported on all hosts (default/casper/derecho).
+                  uv must already be on PATH (or available as a module); it is
+                  not bootstrapped for you.
   --verbose, -v   Show module/backend setup output (quiet by default).
   --rebuild, -r   Rebuild the environment even if it already exists.
                   The existing env is moved aside and removed in the
@@ -311,42 +311,31 @@ __ce_build_env() {
     # host-specific post-install steps
     if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
 
-        # hwloc supplies the build headers for aws-ofi-nccl.  Install it (plus
-        # pkg-config, so build-aws-ofi-nccl-plugin.sh can find it via the conda
-        # lib/pkgconfig/hwloc.pc) ONLY when the system/module environment lacks
-        # the dev headers; otherwise we build/link against the system hwloc.
-        # The probe runs HERE, after modules are loaded, in the real build env.
-        if { command -v pkg-config >/dev/null 2>&1 && pkg-config --exists hwloc 2>/dev/null; } \
-           || printf '#include <hwloc.h>\n' | ${CC:-cc} -E -x c - >/dev/null 2>&1; then
-            echo "config_env.sh: system/module hwloc dev found; not installing conda hwloc."
-        else
-            echo "config_env.sh: no system hwloc.h; installing CUDA-aware hwloc + pkg-config from conda-forge."
-            # CONDA_OVERRIDE_CUDA lets the cuda129 build resolve on a driverless
-            # login node, where conda's __cuda virtual package is otherwise absent.
-            CONDA_OVERRIDE_CUDA="12.9" conda install \
-                  --yes \
-                  -c conda-forge \
-                  "libhwloc=*=cuda129*" cuda-version=12.9 pkg-config || {
-                echo "config_env.sh: hwloc/pkg-config install failed." >&2
-                return 1
-            }
-        fi
-
-        # Build the OFI Plugin (it makes its own hwloc prefix/rpath decision).
-        # Fail loudly: a broken plugin must NOT report success.
+        # Build the AWS OFI NCCL plugin and its non-Python build dependency
+        # (hwloc) under a single per-env "dependencies" prefix, independent of
+        # the packaging backend.  The build script provisions a standalone
+        # CUDA-aware hwloc there when the system lacks the dev headers, and makes
+        # its own hwloc prefix/rpath decision.  Fail loudly: a broken plugin must
+        # NOT report success.
         export AWS_OFI_NCCL_VERSION="v1.19.2"
+        export AWS_OFI_PLUGIN_HOME="${ENV_DIR}/dependencies"
         ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh || {
             echo "config_env.sh: aws-ofi-nccl plugin build failed." >&2
             return 1
         }
 
-        # install the env var hooks (the deactivate.d dir may not exist yet):
-        mkdir -p ${CONDA_PREFIX}/etc/conda/activate.d ${CONDA_PREFIX}/etc/conda/deactivate.d \
-            && cp ${SCRIPTDIR}/activate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/activate.d/nccl-hpe-cxi.sh \
-            && cp ${SCRIPTDIR}/deactivate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/deactivate.d/nccl-hpe-cxi.sh || {
-            echo "config_env.sh: failed to install NCCL activate/deactivate hooks." >&2
-            return 1
-        }
+        # For the conda backend, also install activate.d/deactivate.d hooks so a
+        # bare `conda activate <prefix>` sets the NCCL/CXI runtime env on its own
+        # (the deactivate.d dir may not exist yet).  Both backends additionally
+        # get the hook sourced into the caller's shell by __ce_source_runtime_hooks.
+        if [ "${BACKEND}" = "conda" ]; then
+            mkdir -p ${CONDA_PREFIX}/etc/conda/activate.d ${CONDA_PREFIX}/etc/conda/deactivate.d \
+                && cp ${SCRIPTDIR}/activate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/activate.d/nccl-hpe-cxi.sh \
+                && cp ${SCRIPTDIR}/deactivate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/deactivate.d/nccl-hpe-cxi.sh || {
+                echo "config_env.sh: failed to install NCCL activate/deactivate hooks." >&2
+                return 1
+            }
+        fi
     fi
 
     #-------------------------------------------------------
@@ -376,6 +365,21 @@ __ce_build_env() {
 }
 
 #----------------------------------------------------------------------------
+# Source the NCCL/CXI runtime hook into the CALLER's shell (only meaningful when
+# this file is itself sourced).  Runs after activation on EVERY invocation --
+# both the fresh-build and the already-exists paths -- so `source config_env.sh`
+# always sets NCCL_NET / NCCL_NET_PLUGIN / LD_LIBRARY_PATH for the relocated
+# plugin.  The hook derives the env prefix from VIRTUAL_ENV/CONDA_PREFIX and is a
+# no-op (no plugin file) on hosts that do not build it.  For conda this overlaps
+# the activate.d hook -- a harmless, idempotent double-source.
+__ce_source_runtime_hooks() {
+    [ "${NEEDS_OFI_PLUGIN}" -eq 1 ] || return 0
+    [ -f "${SCRIPTDIR}/activate-nccl-hpe-cxi.sh" ] && \
+        source "${SCRIPTDIR}/activate-nccl-hpe-cxi.sh"
+    return 0
+}
+
+#----------------------------------------------------------------------------
 # Tidy up all shell state (important when SOURCED -- functions and vars defined
 # here would otherwise persist in the caller's interactive shell).
 # NOTE: when adding a new function/var above, add its name here too.
@@ -385,7 +389,7 @@ __ce_cleanup() {
           __ce_show_help __ce_bad_arg __ce_arg __ce_status 2>/dev/null
     unset -f __ce_usage run_quiet __ce_parse_args __ce_host_config __ce_setup_modules \
              __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
-             __ce_activate_if_exists __ce_build_env __ce_run 2>/dev/null
+             __ce_activate_if_exists __ce_build_env __ce_source_runtime_hooks __ce_run 2>/dev/null
     unset -f __ce_cleanup 2>/dev/null   # self-unset LAST
     return "${1:-0}"                    # propagate the status passed in
 }
@@ -409,27 +413,23 @@ __ce_run() {
 
     TARGET_HOST="${NCAR_HOST:-default}"
 
-    # Scope guard: the uv backend cannot supply the non-Python build deps
-    # (libhwloc/pkg-config) or the conda activate.d NCCL hooks that derecho
-    # requires, so --uv is supported on default/casper only.
-    if [ "${BACKEND}" = "uv" ] && [ "${TARGET_HOST}" = "derecho" ]; then
-        echo "config_env.sh: --uv is not supported on derecho; use the conda backend." >&2
-        return 1
-    fi
-
     __ce_host_config
     __ce_setup_modules
 
     __ce_ensure_backend || return 1
     __ce_maybe_rebuild  || return 1
 
-    # Activate if it exists (and we did not just remove it for rebuild).
+    # Activate if it exists (and we did not just remove it for rebuild);
+    # otherwise build it from scratch.  Either way, source any runtime hooks
+    # into the caller's shell afterwards so every `source config_env.sh` sets
+    # the NCCL/CXI + plugin-discovery env.
     if __ce_activate_if_exists; then
-        return 0
+        :
+    else
+        __ce_build_env || return 1
     fi
 
-    # OK - from here on out we are building the environment.
-    __ce_build_env || return 1
+    __ce_source_runtime_hooks
     return 0
 }
 

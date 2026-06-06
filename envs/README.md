@@ -42,7 +42,7 @@ These work identically whether the script is sourced or executed:
 
 | Option            | Effect                                                                 |
 | ----------------- | ---------------------------------------------------------------------- |
-| `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on `default`/`casper`; `derecho` is conda-only. |
+| `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on all hosts (`default`/`casper`/`derecho`). |
 | `--verbose`, `-v` | Show module/backend setup output (suppressed by default).              |
 | `--rebuild`, `-r` | Rebuild even if the environment exists. The old prefix is moved aside and removed in the background, then a fresh environment is built. |
 | `--help`, `-h`    | Print usage and stop.                                                  |
@@ -63,15 +63,20 @@ unchanged.
   backend is loaded). The script does **not** bootstrap uv for you; install it
   per the [uv docs](https://docs.astral.sh/uv/getting-started/installation/)
   or `module load uv` first.
-- The uv env gets its **own prefix** (`credit-env-uv`, `credit-env-casper-uv`)
-  so a uv build and a conda build can coexist. Activate it the standard venv
-  way: `source envs/credit-env-uv/bin/activate`.
+- The uv env gets its **own prefix** (`credit-env-uv`, `credit-env-casper-uv`,
+  `credit-env-derecho-uv`) so a uv build and a conda build can coexist. Activate
+  it the standard venv way: `source envs/credit-env-uv/bin/activate`.
 - `mpi4py` is still forced to a source build, via uv's `--no-binary mpi4py`
   (uv does not honor pip's `PIP_NO_BINARY`).
-- **`derecho` is conda-only.** Its path needs a *non-Python* build dependency
-  (`libhwloc` + `pkg-config` from conda-forge) for the AWS OFI NCCL plugin and
-  conda `activate.d` hooks — neither of which uv can provide — so `--uv` on
-  `derecho` stops with an error.
+- **`derecho` is supported under `--uv`.** Its one *non-Python* build dependency
+  (`libhwloc`) is no longer installed into the Python env: the plugin build
+  script provisions it in a **standalone conda env** under
+  `<env>/dependencies/hwloc-env` (using only the `conda` binary, never
+  activated), so the choice of Python backend is irrelevant. The NCCL/CXI
+  runtime variables are applied by **`config_env.sh` itself sourcing the hook**
+  after activation (conda additionally keeps its `activate.d`/`deactivate.d`
+  hooks). One caveat under uv: a bare `deactivate` does **not** unset those
+  variables — re-`source config_env.sh` or start a fresh shell.
 
 ```bash
 # build (first time) or activate a uv-backed env into your current shell:
@@ -154,21 +159,43 @@ NCCL  →  aws-ofi-nccl  →  libfabric  →  CXI provider (Slingshot)
 The **AWS OFI NCCL plugin** (`aws-ofi-nccl`) is the network backend that lets
 NCCL issue its sends/receives over libfabric. On the `derecho` path the
 installer builds it (`build-aws-ofi-nccl-plugin.sh`) against the Cray libfabric
-and CUDA in the loaded modules, installing it into the conda environment.
+and CUDA in the loaded modules. The plugin and its non-Python build
+dependencies live under a single per-env **`<env>/dependencies/`** prefix
+(independent of whether the Python env is conda- or uv-managed):
 
-To actually select and tune it at runtime, the installer also copies two conda
-activation hooks into the environment (derived from HPE's
-[`shs-ccl-docs`](https://github.com/HewlettPackard/shs-ccl-docs)):
+```
+<env>/dependencies/
+├── lib/libnccl-net-ofi.so        ← the plugin (configure --prefix)
+└── hwloc-env/lib/libhwloc.so.15  ← standalone conda env, rpath'd by the plugin
+```
 
-- `etc/conda/activate.d/nccl-hpe-cxi.sh` sets `NCCL_NET="AWS Libfabric"` (which
-  selects the plugin) along with the recommended `FI_CXI_*` and `NCCL_*`
-  fabric tunables.
-- `etc/conda/deactivate.d/nccl-hpe-cxi.sh` unsets `NCCL_NET` again.
+`hwloc` is a build-time dependency of the plugin. The build script uses the
+system/module copy when its development headers are present; otherwise (the
+case on Derecho) it provisions a CUDA-aware `libhwloc` + `pkg-config` in the
+**standalone `hwloc-env` conda env** above — created with the `conda` *binary*
+only (never activated), so it is decoupled from the Python packaging backend —
+and links the plugin against it via rpath so it is used at runtime.
 
-`hwloc` is a build-time dependency of the plugin. The installer pulls it from
-conda-forge **only when the system lacks the development headers** (the case on
-Derecho), and links the plugin (via rpath) against that copy so it is used at
-runtime; `pkg-config` is installed alongside it for detection.
+Because the plugin no longer sits in the environment's default `lib/`, and a uv
+venv never auto-exposes a lib directory, the runtime hook points NCCL straight
+at it: it exports `NCCL_NET_PLUGIN` to the full `.so` path and prepends
+`<env>/dependencies/lib` to `LD_LIBRARY_PATH`.
+
+To select and tune the plugin at runtime, `config_env.sh` **sources the NCCL
+activation hook into your shell** after activation, on every invocation (so a
+plain `source config_env.sh` is enough). The hooks derive from HPE's
+[`shs-ccl-docs`](https://github.com/HewlettPackard/shs-ccl-docs):
+
+- `activate-nccl-hpe-cxi.sh` sets `NCCL_NET="AWS Libfabric"` (which selects the
+  plugin) plus the recommended `FI_CXI_*`/`NCCL_*` tunables and the
+  `NCCL_NET_PLUGIN`/`LD_LIBRARY_PATH` discovery vars above.
+- `deactivate-nccl-hpe-cxi.sh` reverses them.
+
+For the **conda** backend the installer additionally copies these into
+`etc/conda/{activate,deactivate}.d/` so a bare `conda activate <prefix>` is
+self-sufficient. The **uv** backend has no `activate.d` equivalent, so it relies
+on `config_env.sh` sourcing the hook; note a bare `deactivate` will not unset
+the variables under uv.
 
 > **WARNING:** Do **not** set `NCCL_NET` for single-node runs — forcing the
 > network transport when all ranks share a node causes unnecessary VNI
