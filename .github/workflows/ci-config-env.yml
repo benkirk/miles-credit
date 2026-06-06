@@ -61,8 +61,14 @@ jobs:
 
       - name: Syntax check (bash -n and zsh -n)
         run: |
+          # config_env.sh + host_config.sh are sourced under bash AND zsh.
           bash -n envs/config_env.sh
           zsh  -n envs/config_env.sh
+          bash -n envs/host_config.sh
+          zsh  -n envs/host_config.sh
+          # create_env.sh is execute-only (a bash subprocess), like
+          # build-aws-ofi-nccl-plugin.sh -> bash-only.
+          bash -n envs/create_env.sh
 
       - name: "--help (execute under ${{ matrix.shell }})"
         run: |
@@ -104,12 +110,16 @@ jobs:
           cat > "$RUNNER_TEMP/src_help.sh" <<'EOF'
           source envs/config_env.sh --help; rc=$?
           [ "$rc" -eq 0 ] || { echo "FAIL: source --help rc=$rc (want 0)"; exit 1; }
-          # No helper FUNCTIONS may survive in the caller shell.
-          for fn in __ce_run __ce_cleanup __ce_host_config __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda run_quiet; do
+          # No helper FUNCTIONS may survive in the caller shell (config_env.sh
+          # AND the host_config.sh it sources -> __ce_host_config[_cleanup]).
+          for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda run_quiet; do
             if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
           done
           # No helper VARIABLES may survive (${VAR+set} is a set-test, bash & zsh).
-          for v in CONDA_ROOT VERBOSE REBUILD BACKEND TARGET_HOST ENV_NAME ENV_DIR __ce_status; do
+          # Includes the host-policy scalars owned by host_config.sh.
+          for v in CONDA_ROOT VERBOSE REBUILD BACKEND TARGET_HOST __ce_status \
+                   ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
+                   __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL; do
             eval "probe=\${$v+set}"
             if [ "${probe:-}" = set ]; then echo "FAIL: leaked variable: $v"; exit 1; fi
           done
@@ -220,7 +230,7 @@ jobs:
             */envs/$CE_ENV) echo "OK: $CE_MARKER=$marker_val" ;;
             *) echo "FAIL: $CE_MARKER not the env: '$marker_val'"; exit 1 ;;
           esac
-          for fn in __ce_run __ce_cleanup run_quiet; do
+          for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup run_quiet; do
             if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
           done
           echo "OK: source-activate leaves no residue"

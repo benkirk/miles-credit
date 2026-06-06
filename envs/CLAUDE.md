@@ -9,12 +9,35 @@ behavior changes.
 
 | File | Role |
 | --- | --- |
-| `config_env.sh` | Unified installer/activator. Dual-mode (source **or** execute), `bash`+`zsh`, conda (default) or `uv` (`--uv`), idempotent, per-host policy. The orchestrator. |
-| `build-aws-ofi-nccl-plugin.sh` | derecho-only. Builds the AWS OFI NCCL plugin + (if no system hwloc) a standalone hwloc into `<env>/dependencies/`. Owns **all** hwloc logic. |
+| `config_env.sh` | Dual-mode (source **or** execute) entry point. `bash`+`zsh`, conda (default) or `uv` (`--uv`), idempotent. Does modules, env vars, **activation**, and orchestration in the caller's shell. Shells out to `create_env.sh` to build. |
+| `host_config.sh` | Per-host policy (`__ce_host_config`) — the **single source of truth**. SOURCED (never executed) by both `config_env.sh` and `create_env.sh`, so both derive identical `ENV_DIR`/pip-target/flags. Owns its own cleanup (`__ce_host_config_cleanup`). |
+| `create_env.sh` | The build recipe (conda create / `uv venv`, pip install, OFI plugin, probe). **EXECUTE-ONLY**: `config_env.sh` runs it as a SUBPROCESS when the env is absent, so it pollutes nothing. Mirrors `build-aws-ofi-nccl-plugin.sh`. |
+| `build-aws-ofi-nccl-plugin.sh` | derecho-only. Builds the AWS OFI NCCL plugin + (if no system hwloc) a standalone hwloc into `<env>/dependencies/`. Owns **all** hwloc logic. Invoked by `create_env.sh`. |
 | `activate-nccl-hpe-cxi.sh` / `deactivate-nccl-hpe-cxi.sh` | Runtime NCCL/Cray-Slingshot (CXI) env vars + plugin discovery (`NCCL_NET_PLUGIN`, `LD_LIBRARY_PATH`). |
 | `probe_installed_env.py` | Post-install health check (torch/CUDA/NCCL, `import credit`); `--require-nccl`, `--verbose`. |
 | `README.md` | User-facing documentation. |
 | `../.github/workflows/ci-config-env.yml` | CI for all of the above. |
+
+## How the three files fit together
+
+`config_env.sh` is the only dual-mode file (it must `return`/`exit` correctly
+when sourced). It sources `host_config.sh` for policy, and when the env is
+absent it **executes** `create_env.sh` as a child process to build, then
+re-activates the finished prefix in the caller's shell itself.
+
+Inter-file contract (the part to hold in your head):
+- `create_env.sh` is a **subprocess** → it inherits exported env vars and the
+  **module environment** the parent loaded (modules are env vars), but **not**
+  shell functions. So it re-sources `conda.sh` itself (the `conda activate`
+  *function* isn't inherited) and re-derives host policy by sourcing
+  `host_config.sh` + calling `__ce_host_config` (agreement with the parent by
+  construction, not via a fragile export list). The parent passes only `BACKEND`
+  and `VERBOSE`; `NCAR_HOST` is already in the environment.
+- `create_env.sh`'s own `conda activate`/venv-activate during the build is local
+  and discarded — that's why the parent **always** activates afterward (a single
+  activation path for both build-vs-already-exists).
+- `create_env.sh` does **not** use `set -eu` (it sources activate scripts that
+  trip `-u`/`-e`); it relies on an explicit `|| { …; exit 1; }` per step.
 
 ## Non-negotiable invariants for `config_env.sh`
 
@@ -29,14 +52,18 @@ script is sourced into interactive shells and PBS run scripts):
    "≤1 optional token" tricks (e.g. `${__CE_CUDA_MODULE}`) — they expand
    identically in both shells.
 3. **Zero shell-state pollution when sourced.** `__ce_cleanup` must `unset` every
-   variable and `unset -f` every function this script defines. **If you add a
-   helper function or a variable, add its name to the matching list in
-   `__ce_cleanup` in the same edit.** This is the #1 regression here, and CI's
+   variable and `unset -f` every function the sourced path defines. **If you add a
+   helper function or a variable, add its name to the matching list in the same
+   edit.** Cleanup is now split by ownership: `config_env.sh`'s own
+   vars/functions go in its `__ce_cleanup`; the host-policy vars/functions go in
+   `host_config.sh`'s `__ce_host_config_cleanup` (which `__ce_cleanup` invokes).
+   Add a name to the list **in the file that defines it**. (`create_env.sh` is a
+   subprocess and needs no cleanup.) This is the #1 regression here, and CI's
    "no shell pollution" step will catch it — but check it yourself.
 4. **Host policy is one source of truth.** All per-host differences live in
-   `__ce_host_config` (one `case` arm per host). Adding a host = add one arm;
-   nothing else should grow host-awareness except `__ce_setup_modules` if its
-   module set genuinely differs.
+   `__ce_host_config` **in `host_config.sh`** (one `case` arm per host). Adding a
+   host = add one arm; nothing else should grow host-awareness except
+   `__ce_setup_modules` (in `config_env.sh`) if its module set genuinely differs.
 5. **Idempotent.** First run builds; later runs just `Activating …`. `--rebuild`
    moves the old prefix aside and `rm`s it in the background. Don't make the
    activate path do build work.
@@ -74,9 +101,11 @@ script is sourced into interactive shells and PBS run scripts):
 
 ## How to verify a change
 
-- Syntax: `bash -n envs/config_env.sh && zsh -n envs/config_env.sh`.
+- Syntax: `bash -n` + `zsh -n` on `config_env.sh` and `host_config.sh`;
+  `bash -n envs/create_env.sh` (execute-only → bash only).
 - Fast contract (no build): `--help`, `--uv --help`, `--bogus` (maps to rc 0),
-  and sourced `--help` leaving no `__ce_*`/`BACKEND` residue under bash & zsh.
+  and sourced `--help` leaving no `__ce_*`/`BACKEND`/host-policy residue under
+  bash & zsh.
 - **HPC behavior is not covered by CI** — the heavy `casper`/`derecho` builds
   (CUDA wheels, NCCL, Cray libfabric, the OFI plugin) can't run on free runners.
   Validate those **manually on a casper/derecho login node**, both backends, full
