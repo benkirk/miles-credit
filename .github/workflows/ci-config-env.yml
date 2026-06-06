@@ -3,10 +3,10 @@ name: CI config_env
 # Exercises envs/config_env.sh across OS/arch and shells. The script's contract
 # is: dual-mode (runnable OR sourceable), bash + zsh, idempotent activate, smart
 # --rebuild, and ZERO shell-state pollution when sourced. We run the script
-# exactly as-is (no script changes); the heavy `full-build` (conda) and
-# `full-build-uv` (--uv) legs report reality, so they may be red where the
-# scientific stack (pygrib/eccodes) or the GPU-only torch.cuda.nccl check
-# cannot succeed on a CPU runner.
+# exactly as-is (no script changes); the heavy `full-build` legs (one per
+# backend -- conda and uv -- via the matrix) report reality, so they may be red
+# where the scientific stack (pygrib/eccodes) or the GPU-only torch.cuda.nccl
+# check cannot succeed on a CPU runner.
 #
 # The `matrix` context is NOT permitted in a step's `shell:` field, so every
 # step runs under `shell: bash` and we invoke the shell-under-test from inside
@@ -133,17 +133,24 @@ jobs:
 
   # --------------------------------------------------------------------------
   # Heavy: builds the real environment and exercises the runtime permutations
-  # (fresh build, idempotent activate, source-activate, --rebuild). Honest by
-  # design: a leg goes red wherever the real build cannot complete.
+  # (fresh build, idempotent activate, source-activate, --rebuild) plus
+  # pipdeptree + pytest in the built env. ONE parameterized job covers BOTH
+  # backends via `matrix.backend` (conda and uv); the per-backend differences
+  # are isolated to the derived CE_* vars, the if:-guarded setup steps, and a
+  # single branch in the tooling step. Honest by design: a leg goes red wherever
+  # the real build cannot complete. uv is provided on PATH (the script never
+  # bootstraps it), matching how Casper exposes uv via a module. uv scope is
+  # default/casper (derecho stays conda); this portable leg uses `default`.
   # --------------------------------------------------------------------------
   full-build:
-    name: build / ${{ matrix.os }} / ${{ matrix.shell }}
+    name: build / ${{ matrix.backend }} / ${{ matrix.os }} / ${{ matrix.shell }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         shell: [bash, zsh]
+        backend: [conda, uv]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -154,7 +161,19 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh
 
+      - name: Derive backend vars
+        run: |
+          # Single source of truth for the per-backend differences, exported to
+          # the later steps: the script flag, the env-dir suffix, and the
+          # activation marker the source-activate check inspects.
+          if [ "${{ matrix.backend }}" = uv ]; then
+            { echo "CE_ARGS=--uv"; echo "CE_ENV=credit-env-uv"; echo "CE_MARKER=VIRTUAL_ENV"; } >> "$GITHUB_ENV"
+          else
+            { echo "CE_ARGS=";     echo "CE_ENV=credit-env";    echo "CE_MARKER=CONDA_PREFIX"; } >> "$GITHUB_ENV"
+          fi
+
       - name: Set up conda (Miniforge)
+        if: matrix.backend == 'conda'
         uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
           miniforge-version: latest
@@ -163,24 +182,33 @@ jobs:
           conda-remove-defaults: true
 
       - name: Put conda on PATH for every shell
+        if: matrix.backend == 'conda'
         shell: bash -el {0}
         run: |
           base=$(conda info --base)
           echo "$base/condabin" >> "$GITHUB_PATH"
           echo "$base/bin"      >> "$GITHUB_PATH"
 
-      - name: "Execute: fresh build (${{ matrix.shell }})"
+      - name: Install uv (on PATH)
+        if: matrix.backend == 'uv'
         run: |
-          if ! ${{ matrix.shell }} envs/config_env.sh; then
+          # The standalone installer needs no pinned third-party action and
+          # works on Linux + macOS runners.
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: "Execute: fresh build (${{ matrix.backend }}, ${{ matrix.shell }})"
+        run: |
+          if ! ${{ matrix.shell }} envs/config_env.sh $CE_ARGS; then
             echo "FAIL: fresh build returned non-zero"; exit 1
           fi
-          test -d envs/credit-env || { echo "FAIL: envs/credit-env not created"; exit 1; }
+          test -d "envs/$CE_ENV" || { echo "FAIL: envs/$CE_ENV not created"; exit 1; }
           echo "OK: fresh build"
 
       - name: "Execute: idempotent activate (no rebuild)"
         run: |
           set +e
-          out=$(${{ matrix.shell }} envs/config_env.sh 2>&1); rc=$?
+          out=$(${{ matrix.shell }} envs/config_env.sh $CE_ARGS 2>&1); rc=$?
           set -e
           printf '%s\n' "$out"
           [ "$rc" -eq 0 ] || { echo "FAIL: re-run rc=$rc"; exit 1; }
@@ -191,14 +219,19 @@ jobs:
           fi
           echo "OK: idempotent activate"
 
-      - name: "Source: activate, CONDA_PREFIX, no pollution (${{ matrix.shell }})"
+      - name: "Source: activate marker + no pollution (${{ matrix.backend }}, ${{ matrix.shell }})"
         run: |
+          # CE_ARGS/CE_ENV/CE_MARKER are exported (step env above), so they reach
+          # the temp script the matrix shell runs. The marker is resolved
+          # indirectly so one check covers both CONDA_PREFIX and VIRTUAL_ENV
+          # (bash & zsh safe).
           cat > "$RUNNER_TEMP/src_activate.sh" <<'EOF'
-          source envs/config_env.sh; rc=$?
+          source envs/config_env.sh $CE_ARGS; rc=$?
           [ "$rc" -eq 0 ] || { echo "FAIL: source rc=$rc"; exit 1; }
-          case "$CONDA_PREFIX" in
-            */envs/credit-env) echo "OK: CONDA_PREFIX=$CONDA_PREFIX" ;;
-            *) echo "FAIL: CONDA_PREFIX not the env: '$CONDA_PREFIX'"; exit 1 ;;
+          eval "marker_val=\${$CE_MARKER}"
+          case "$marker_val" in
+            */envs/$CE_ENV) echo "OK: $CE_MARKER=$marker_val" ;;
+            *) echo "FAIL: $CE_MARKER not the env: '$marker_val'"; exit 1 ;;
           esac
           for fn in __ce_run __ce_cleanup run_quiet; do
             if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
@@ -207,153 +240,38 @@ jobs:
           EOF
           ${{ matrix.shell }} "$RUNNER_TEMP/src_activate.sh"
 
-      - name: "Execute: rebuild (-r)"
+      - name: "Execute: rebuild (${{ matrix.backend }} -r)"
         run: |
           set +e
-          out=$(${{ matrix.shell }} envs/config_env.sh -r 2>&1); rc=$?
+          out=$(${{ matrix.shell }} envs/config_env.sh $CE_ARGS -r 2>&1); rc=$?
           set -e
           printf '%s\n' "$out"
           [ "$rc" -eq 0 ] || { echo "FAIL: rebuild rc=$rc"; exit 1; }
           printf '%s\n' "$out" | grep -q 'Rebuild requested' \
             || { echo "FAIL: expected 'Rebuild requested'"; exit 1; }
-          test -d envs/credit-env || { echo "FAIL: env missing after rebuild"; exit 1; }
+          test -d "envs/$CE_ENV" || { echo "FAIL: env missing after rebuild"; exit 1; }
           echo "OK: rebuild"
 
-      - name: "Inspect built environment (pipdeptree)"
-        run: |
-          # CI-only dependency introspection. pipdeptree is pip-only and
-          # lightweight; it runs inside the env via `conda run`. Deliberately
-          # NOT added to config_env.sh or pyproject.toml -- the env is kept
-          # intentionally minimal. (conda-tree is avoided on purpose: it pulls
-          # conda into the env, which defeats that minimality.)
-          env_prefix="$GITHUB_WORKSPACE/envs/credit-env"
-          conda run -p "$env_prefix" pip install pipdeptree
-          echo "::group::pipdeptree --depth 3"
-          conda run --no-capture-output -p "$env_prefix" pipdeptree --depth 3
-          echo "::endgroup::"
-
-      - name: "Run test suite (pytest)"
+      - name: "Inspect (pipdeptree) + test (pytest) in the built env"
         env:
           # Skip the tests that reach real AWS S3 (HRRR remote fetch) so the
           # suite stays hermetic and non-flaky on CI runners. Multi-GPU/NCCL
           # tests self-skip on CPU (torch.cuda.device_count() < 2).
           SKIP_HRRR_REMOTE: "1"
         run: |
-          # CI-only test tooling, mirroring the pipdeptree step above: pytest is
-          # installed INTO the built env at CI time via `conda run`, NOT added to
-          # config_env.sh or pyproject.toml -- the env is kept intentionally
-          # minimal. Coverage is deliberately not collected.
-          env_prefix="$GITHUB_WORKSPACE/envs/credit-env"
-          conda run -p "$env_prefix" pip install pytest
-          echo "::group::pytest tests/"
-          conda run --no-capture-output -p "$env_prefix" pytest tests/
-          echo "::endgroup::"
-
-  # --------------------------------------------------------------------------
-  # Heavy (uv backend): same runtime permutations as `full-build`, but exercises
-  # `config_env.sh --uv` -- a uv-managed venv + `uv pip install` instead of
-  # conda. Scope: default/casper only (derecho stays conda), so this leg uses
-  # the portable `default` config. Honest by design: red wherever the real
-  # build cannot complete. uv is provided on PATH (the script does NOT bootstrap
-  # it), matching how Casper exposes uv via a module.
-  # --------------------------------------------------------------------------
-  full-build-uv:
-    name: build-uv / ${{ matrix.os }} / ${{ matrix.shell }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
-        shell: [bash, zsh]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Install zsh (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y zsh
-
-      - name: Install uv (on PATH)
-        run: |
-          # Provide uv the same way a user would (the script requires it on
-          # PATH and never bootstraps it). The standalone installer needs no
-          # pinned third-party action and works on Linux + macOS runners.
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: "Execute: fresh build (--uv, ${{ matrix.shell }})"
-        run: |
-          if ! ${{ matrix.shell }} envs/config_env.sh --uv; then
-            echo "FAIL: fresh uv build returned non-zero"; exit 1
+          # CI-only tooling, installed INTO the built env at CI time -- NOT added
+          # to config_env.sh or pyproject.toml (the env is kept intentionally
+          # minimal). Coverage is deliberately not collected. The backends differ
+          # only in how we install into / run inside the env: conda has
+          # `conda run` + pip; a uv venv has neither, so we target its python
+          # via `uv pip --python` and invoke the venv's own bin/.
+          P="$GITHUB_WORKSPACE/envs/$CE_ENV"
+          if [ "${{ matrix.backend }}" = uv ]; then
+            uv pip install --python "$P/bin/python" pipdeptree pytest
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; }
+          else
+            conda run -p "$P" pip install pipdeptree pytest
+            in_env() { conda run --no-capture-output -p "$P" "$@"; }
           fi
-          test -f envs/credit-env-uv/bin/activate \
-            || { echo "FAIL: envs/credit-env-uv venv not created"; exit 1; }
-          echo "OK: fresh uv build"
-
-      - name: "Execute: idempotent activate (--uv, no rebuild)"
-        run: |
-          set +e
-          out=$(${{ matrix.shell }} envs/config_env.sh --uv 2>&1); rc=$?
-          set -e
-          printf '%s\n' "$out"
-          [ "$rc" -eq 0 ] || { echo "FAIL: re-run rc=$rc"; exit 1; }
-          printf '%s\n' "$out" | grep -q 'Activating' \
-            || { echo "FAIL: expected 'Activating' (activate short-circuit)"; exit 1; }
-          if printf '%s\n' "$out" | grep -q 'successfully installed'; then
-            echo "FAIL: rebuilt instead of activating an existing env"; exit 1
-          fi
-          echo "OK: idempotent activate"
-
-      - name: "Source: activate, VIRTUAL_ENV, no pollution (--uv, ${{ matrix.shell }})"
-        run: |
-          cat > "$RUNNER_TEMP/src_activate_uv.sh" <<'EOF'
-          source envs/config_env.sh --uv; rc=$?
-          [ "$rc" -eq 0 ] || { echo "FAIL: source rc=$rc"; exit 1; }
-          case "$VIRTUAL_ENV" in
-            */envs/credit-env-uv) echo "OK: VIRTUAL_ENV=$VIRTUAL_ENV" ;;
-            *) echo "FAIL: VIRTUAL_ENV not the env: '$VIRTUAL_ENV'"; exit 1 ;;
-          esac
-          for fn in __ce_run __ce_cleanup run_quiet; do
-            if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
-          done
-          echo "OK: source-activate leaves no residue"
-          EOF
-          ${{ matrix.shell }} "$RUNNER_TEMP/src_activate_uv.sh"
-
-      - name: "Execute: rebuild (--uv -r)"
-        run: |
-          set +e
-          out=$(${{ matrix.shell }} envs/config_env.sh --uv -r 2>&1); rc=$?
-          set -e
-          printf '%s\n' "$out"
-          [ "$rc" -eq 0 ] || { echo "FAIL: rebuild rc=$rc"; exit 1; }
-          printf '%s\n' "$out" | grep -q 'Rebuild requested' \
-            || { echo "FAIL: expected 'Rebuild requested'"; exit 1; }
-          test -f envs/credit-env-uv/bin/activate \
-            || { echo "FAIL: env missing after rebuild"; exit 1; }
-          echo "OK: rebuild"
-
-      - name: "Inspect built environment (pipdeptree)"
-        run: |
-          # CI-only dependency introspection, mirroring the conda leg. Installed
-          # INTO the built venv via uv (NOT added to config_env.sh/pyproject).
-          env_prefix="$GITHUB_WORKSPACE/envs/credit-env-uv"
-          uv pip install --python "$env_prefix/bin/python" pipdeptree
-          echo "::group::pipdeptree --depth 3"
-          "$env_prefix/bin/pipdeptree" --depth 3
-          echo "::endgroup::"
-
-      - name: "Run test suite (pytest)"
-        env:
-          # Skip tests that reach real AWS S3 (HRRR remote fetch); multi-GPU/NCCL
-          # tests self-skip on CPU. Mirrors the conda full-build leg.
-          SKIP_HRRR_REMOTE: "1"
-        run: |
-          # CI-only test tooling, installed INTO the built venv via uv.
-          env_prefix="$GITHUB_WORKSPACE/envs/credit-env-uv"
-          uv pip install --python "$env_prefix/bin/python" pytest
-          echo "::group::pytest tests/"
-          "$env_prefix/bin/pytest" tests/
-          echo "::endgroup::"
+          echo "::group::pipdeptree --depth 3"; in_env pipdeptree --depth 3; echo "::endgroup::"
+          echo "::group::pytest tests/";        in_env pytest tests/;        echo "::endgroup::"
