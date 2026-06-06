@@ -33,6 +33,7 @@ source "${SCRIPTDIR}/host_config.sh"
 
 BACKEND="${BACKEND:-conda}"
 VERBOSE="${VERBOSE:-0}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
 TARGET_HOST="${NCAR_HOST:-default}"
 __ce_host_config
 
@@ -51,7 +52,8 @@ fi
 
 
 #-------------------------------------------------------
-# create a minimal isolated environment with a controlled Python (3.11)
+# create a minimal isolated environment with a controlled Python (default 3.11;
+# set by --python-version, passed in as PYTHON_VERSION)
 if [ "${BACKEND}" = "uv" ]; then
     # Force a uv-managed standalone CPython (--managed-python) so the venv
     # never adopts an interpreter the caller's shell merely happens to
@@ -60,7 +62,7 @@ if [ "${BACKEND}" = "uv" ]; then
     # uv symlinks the venv's python at that external interpreter, which then
     # dangles if it is later rebuilt or removed (breaking the uv env and the
     # conda/uv "coexistence" guarantee).
-    uv venv --managed-python --python 3.11 "${ENV_DIR}" || {
+    uv venv --managed-python --python "${PYTHON_VERSION}" "${ENV_DIR}" || {
         echo "create_env.sh: 'uv venv' failed." >&2
         exit 1
     }
@@ -72,7 +74,7 @@ else
     conda create \
           --yes \
           --prefix "${ENV_DIR}" \
-          python=3.11 || {
+          python="${PYTHON_VERSION}" || {
         echo "create_env.sh: 'conda create' failed." >&2
         exit 1
     }

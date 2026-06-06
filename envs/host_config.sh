@@ -10,8 +10,8 @@
 # ENV_DIR / pip target / module set from the same code given the same
 # TARGET_HOST + BACKEND, with no fragile cross-process export list.
 #
-# The sourcer MUST set SCRIPTDIR (the envs/ dir) and BACKEND before calling
-# __ce_host_config; it reads TARGET_HOST too.
+# The sourcer MUST set SCRIPTDIR (the envs/ dir), BACKEND, and PYTHON_VERSION
+# before calling __ce_host_config; it reads TARGET_HOST too.
 #
 # Like config_env.sh this must be portable to BOTH bash and zsh (no associative
 # arrays; no reliance on word-splitting).
@@ -77,6 +77,10 @@ __ce_host_config() {
             echo "ERROR: unhandled ${TARGET_HOST}?!!" >&2
             ;;
     esac
+
+    # Encode the Python version into the prefix (always, even the default) so
+    # envs built with different Python versions coexist and never cross-detect.
+    ENV_NAME="${ENV_NAME}-py${PYTHON_VERSION}"
 
     # Give the uv env its own prefix so a uv build and a conda build can coexist
     # and the per-backend existence tests never cross-detect one another.

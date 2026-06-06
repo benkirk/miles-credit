@@ -103,6 +103,26 @@ jobs:
             || { echo "FAIL: no 'unknown argument' message"; exit 1; }
           echo "OK: bad argument"
 
+      - name: "--python-version parsing (execute under ${{ matrix.shell }})"
+        run: |
+          set +e
+          # A valid value (both forms) still short-circuits on --help -> rc 0.
+          for a in "--python-version 3.12 --help" "--python-version=3.12 --help"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0)"; printf '%s\n' "$out"; exit 1; }
+          done
+          # Missing value: bare trailing flag, and a swallowed following flag.
+          for a in "--python-version" "--python-version --uv"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            set -e
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0, mapped)"; printf '%s\n' "$out"; exit 1; }
+            printf '%s\n' "$out" | grep -q 'missing value' \
+              || { echo "FAIL: '$a' did not report missing value"; printf '%s\n' "$out"; exit 1; }
+            set +e
+          done
+          set -e
+          echo "OK: --python-version parsing"
+
       - name: "Source + dual-mode + no shell pollution (${{ matrix.shell }})"
         run: |
           # --help returns before any build/conda work, so this isolates the
@@ -117,7 +137,7 @@ jobs:
           done
           # No helper VARIABLES may survive (${VAR+set} is a set-test, bash & zsh).
           # Includes the host-policy scalars owned by host_config.sh.
-          for v in CONDA_ROOT VERBOSE REBUILD BACKEND TARGET_HOST __ce_status \
+          for v in CONDA_ROOT VERBOSE REBUILD BACKEND PYTHON_VERSION TARGET_HOST __ce_status __ce_expect_val \
                    ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
                    __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL; do
             eval "probe=\${$v+set}"
@@ -163,10 +183,12 @@ jobs:
           # Single source of truth for the per-backend differences, exported to
           # the later steps: the script flag, the env-dir suffix, and the
           # activation marker the source-activate check inspects.
+          # The default build is Python 3.11, so the prefix carries -py3.11
+          # (the version is always encoded into the env name, even the default).
           if [ "${{ matrix.backend }}" = uv ]; then
-            { echo "CE_ARGS=--uv"; echo "CE_ENV=credit-env-uv"; echo "CE_MARKER=VIRTUAL_ENV"; } >> "$GITHUB_ENV"
+            { echo "CE_ARGS=--uv"; echo "CE_ENV=credit-env-py3.11-uv"; echo "CE_MARKER=VIRTUAL_ENV"; } >> "$GITHUB_ENV"
           else
-            { echo "CE_ARGS=";     echo "CE_ENV=credit-env";    echo "CE_MARKER=CONDA_PREFIX"; } >> "$GITHUB_ENV"
+            { echo "CE_ARGS=";     echo "CE_ENV=credit-env-py3.11";    echo "CE_MARKER=CONDA_PREFIX"; } >> "$GITHUB_ENV"
           fi
 
       - name: Set up conda (Miniforge)

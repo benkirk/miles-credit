@@ -31,8 +31,8 @@ Inter-file contract (the part to hold in your head):
   shell functions. So it re-sources `conda.sh` itself (the `conda activate`
   *function* isn't inherited) and re-derives host policy by sourcing
   `host_config.sh` + calling `__ce_host_config` (agreement with the parent by
-  construction, not via a fragile export list). The parent passes only `BACKEND`
-  and `VERBOSE`; `NCAR_HOST` is already in the environment.
+  construction, not via a fragile export list). The parent passes only `BACKEND`,
+  `VERBOSE`, and `PYTHON_VERSION`; `NCAR_HOST` is already in the environment.
 - `create_env.sh`'s own `conda activate`/venv-activate during the build is local
   and discarded — that's why the parent **always** activates afterward (a single
   activation path for both build-vs-already-exists).
@@ -72,10 +72,15 @@ script is sourced into interactive shells and PBS run scripts):
 
 ## Backend specifics
 
-- **conda** (default) and **uv** (`--uv`) get **separate prefixes**
-  (`credit-env[-host]` vs `…-uv`) so they coexist; existence tests never cross-detect.
+- **Prefix encodes backend AND Python version** so independent builds coexist and
+  existence tests never cross-detect: `credit-env[-host]-py<X.Y>[-uv]` (e.g.
+  `credit-env-py3.11`, `credit-env-derecho-py3.12-uv`). The version is **always**
+  present, even the default 3.11. `__ce_host_config` builds this from `BACKEND` +
+  `PYTHON_VERSION` (a `config_env.sh`-owned input, default 3.11, threaded to the
+  `create_env.sh` subprocess and used for `conda create python=…` / `uv venv
+  --python …`). Add the `-py…` segment in exactly one place (`__ce_host_config`).
 - **uv must provision its own interpreter:** the `uv venv` call uses
-  `--managed-python` so it never adopts whatever `python3.11` the caller's shell
+  `--managed-python` so it never adopts whatever `python<X.Y>` the caller's shell
   exposes (an active conda env, a system python). Without it the venv symlinks an
   external interpreter and dangles when that is rebuilt/removed. Don't drop this flag.
 - `mpi4py` is always a source build: conda path via `PIP_NO_BINARY=mpi4py`; uv

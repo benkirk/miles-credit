@@ -49,12 +49,17 @@ source "${SCRIPTDIR}/host_config.sh"
 #----------------------------------------------------------------------------
 __ce_usage() {
     cat <<USAGE
-Usage: [source] config_env.sh [--uv] [--verbose] [--rebuild] [--help]
+Usage: [source] config_env.sh [--uv] [--python-version X.Y] [--verbose] [--rebuild] [--help]
 
   --uv            Use the 'uv' package installer and a uv-managed venv instead
                   of conda.  Supported on all hosts (default/casper/derecho).
                   uv must already be on PATH (or available as a module); it is
                   not bootstrapped for you.
+  --python-version X.Y
+                  Python version to build the environment with (default 3.11).
+                  Encoded into the env prefix (e.g. credit-env-py3.12) so
+                  multiple versions coexist.  Accepts '--python-version 3.12'
+                  or '--python-version=3.12'.
   --verbose, -v   Show module/backend setup output (quiet by default).
   --rebuild, -r   Rebuild the environment even if it already exists.
                   The existing env is moved aside and removed in the
@@ -85,18 +90,37 @@ __ce_parse_args() {
     VERBOSE=0
     REBUILD=0
     BACKEND="conda"
+    PYTHON_VERSION="3.11"
     __ce_show_help=0
     __ce_bad_arg=""
+    __ce_expect_val=""        # name of the option whose value the NEXT token is
     for __ce_arg in "$@"; do
+        # Consume the value of a space-separated option (e.g. --python-version X).
+        # Guard: a token starting with '-' is a flag, not a value -> missing value.
+        if [ -n "${__ce_expect_val}" ]; then
+            case "${__ce_arg}" in
+                -*) __ce_bad_arg="--${__ce_expect_val} (missing value)" ;;
+                *)  case "${__ce_expect_val}" in
+                        python-version) PYTHON_VERSION="${__ce_arg}" ;;
+                    esac ;;
+            esac
+            __ce_expect_val=""
+            continue
+        fi
         case "${__ce_arg}" in
-            --uv)         BACKEND="uv" ;;
-            --verbose|-v) VERBOSE=1 ;;
-            --rebuild|-r) REBUILD=1 ;;
-            --help|-h)    __ce_show_help=1 ;;
-            "")           : ;;
-            *)            __ce_bad_arg="${__ce_arg}" ;;
+            --uv)                 BACKEND="uv" ;;
+            --python-version)     __ce_expect_val="python-version" ;;
+            --python-version=*)   PYTHON_VERSION="${__ce_arg#*=}" ;;
+            --verbose|-v)         VERBOSE=1 ;;
+            --rebuild|-r)         REBUILD=1 ;;
+            --help|-h)            __ce_show_help=1 ;;
+            "")                   : ;;
+            *)                    __ce_bad_arg="${__ce_arg}" ;;
         esac
     done
+    # A trailing "--python-version" with no following token, or an empty value.
+    [ -n "${__ce_expect_val}" ] && __ce_bad_arg="--${__ce_expect_val} (missing value)"
+    [ -n "${PYTHON_VERSION}" ]  || __ce_bad_arg="--python-version (missing value)"
 }
 
 #----------------------------------------------------------------------------
@@ -219,8 +243,8 @@ __ce_source_runtime_hooks() {
 # host-policy vars/functions are owned by host_config.sh and cleaned up by its
 # __ce_host_config_cleanup (invoked below), so they are NOT listed here.
 __ce_cleanup() {
-    unset VERBOSE REBUILD BACKEND TARGET_HOST CONDA_ROOT \
-          __ce_show_help __ce_bad_arg __ce_arg __ce_status 2>/dev/null
+    unset VERBOSE REBUILD BACKEND PYTHON_VERSION TARGET_HOST CONDA_ROOT \
+          __ce_show_help __ce_bad_arg __ce_arg __ce_expect_val __ce_status 2>/dev/null
     unset -f __ce_usage run_quiet __ce_parse_args __ce_setup_modules \
              __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
              __ce_activate_if_exists __ce_source_runtime_hooks __ce_run 2>/dev/null
@@ -265,7 +289,7 @@ __ce_run() {
     # doubles as the post-build success gate.  Finally source any runtime hooks
     # so every `source config_env.sh` sets the NCCL/CXI + plugin-discovery env.
     if [ ! -d "${ENV_DIR}" ]; then
-        BACKEND="${BACKEND}" VERBOSE="${VERBOSE}" \
+        BACKEND="${BACKEND}" VERBOSE="${VERBOSE}" PYTHON_VERSION="${PYTHON_VERSION}" \
             "${SCRIPTDIR}/create_env.sh" || {
                 echo "config_env.sh: environment build failed." >&2
                 return 1

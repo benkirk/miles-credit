@@ -17,15 +17,18 @@ policy in `host_config.sh`. You never call those directly.
 The target machine is selected by the `NCAR_HOST` environment variable (NCAR
 HPC sets this automatically on login). When `NCAR_HOST` is unset or empty the
 script uses the portable `default` configuration. Each host installs into its
-own prefix alongside this script: `credit-env`, `credit-env-casper`, or
-`credit-env-derecho`.
+own prefix alongside this script, with the Python version always encoded in the
+name: `credit-env-py3.11`, `credit-env-casper-py3.11`, or
+`credit-env-derecho-py3.11` (and e.g. `credit-env-py3.12` with
+`--python-version 3.12`). Different versions — and the `--uv` backend
+(`…-uv`) — coexist in distinct prefixes.
 
 ### Supported hosts
 
 - **`default`** — any host with `conda` already on `PATH` (or `uv`, with
-  `--uv`). Creates a Python 3.11 environment and runs `pip install -e "."`
-  from the repository root. No modules are loaded and no host-specific extras
-  are installed.
+  `--uv`). Creates a Python environment (3.11 by default; see
+  `--python-version`) and runs `pip install -e "."` from the repository root.
+  No modules are loaded and no host-specific extras are installed.
 
 - **`casper`** — loads `ncarenv/25.10`, `gcc/14.3.0`, and `conda`, then
   installs `.[ncar-hpc-casper]` against the CUDA 12.6 PyTorch index
@@ -47,6 +50,7 @@ These work identically whether the script is sourced or executed:
 | Option            | Effect                                                                 |
 | ----------------- | ---------------------------------------------------------------------- |
 | `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on all hosts (`default`/`casper`/`derecho`). |
+| `--python-version X.Y` | Python version to build with (default `3.11`). Always encoded into the prefix (e.g. `credit-env-py3.12`), so versions coexist. Accepts `--python-version 3.12` or `--python-version=3.12`. |
 | `--verbose`, `-v` | Show module/backend setup output (suppressed by default).              |
 | `--rebuild`, `-r` | Rebuild even if the environment exists. The old prefix is moved aside and removed in the background, then a fresh environment is built. |
 | `--help`, `-h`    | Print usage and stop.                                                  |
@@ -54,10 +58,11 @@ These work identically whether the script is sourced or executed:
 ### Alternative: the `uv` backend (`--uv`)
 
 By default the script uses **conda** purely to provide an isolated environment
-with a controlled Python (3.11); everything else is installed with `pip`. The
-`--uv` flag swaps that backend for [`uv`](https://docs.astral.sh/uv/): it
-creates a uv-managed venv (`uv venv --python 3.11`, fetching a managed CPython
-if needed) and installs the same stack with `uv pip install`. Everything else —
+with a controlled Python (3.11 by default; see `--python-version`); everything
+else is installed with `pip`. The `--uv` flag swaps that backend for
+[`uv`](https://docs.astral.sh/uv/): it creates a uv-managed venv (`uv venv
+--python <version>`, fetching a managed CPython if needed) and installs the same
+stack with `uv pip install`. Everything else —
 dual-mode source/execute, `bash`/`zsh`, idempotency, `--rebuild`, the
 post-install health check, and the zero-shell-pollution contract — is
 unchanged.
