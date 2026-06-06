@@ -1,4 +1,4 @@
-# Conda-based Installation
+# Environment Installation (conda, or `uv` via `--uv`)
 
 ## `config_env.sh`
 
@@ -18,9 +18,10 @@ own prefix alongside this script: `credit-env`, `credit-env-casper`, or
 
 ### Supported hosts
 
-- **`default`** — any host with `conda` already on `PATH`. Creates a Python
-  3.11 environment and runs `pip install -e "."` from the repository root. No
-  modules are loaded and no host-specific extras are installed.
+- **`default`** — any host with `conda` already on `PATH` (or `uv`, with
+  `--uv`). Creates a Python 3.11 environment and runs `pip install -e "."`
+  from the repository root. No modules are loaded and no host-specific extras
+  are installed.
 
 - **`casper`** — loads `ncarenv/25.10`, `gcc/14.3.0`, and `conda`, then
   installs `.[ncar-hpc-casper]` against the CUDA 12.6 PyTorch index
@@ -41,9 +42,44 @@ These work identically whether the script is sourced or executed:
 
 | Option            | Effect                                                                 |
 | ----------------- | ---------------------------------------------------------------------- |
-| `--verbose`, `-v` | Show module/conda setup output (suppressed by default).                |
+| `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on `default`/`casper`; `derecho` is conda-only. |
+| `--verbose`, `-v` | Show module/backend setup output (suppressed by default).              |
 | `--rebuild`, `-r` | Rebuild even if the environment exists. The old prefix is moved aside and removed in the background, then a fresh environment is built. |
 | `--help`, `-h`    | Print usage and stop.                                                  |
+
+### Alternative: the `uv` backend (`--uv`)
+
+By default the script uses **conda** purely to provide an isolated environment
+with a controlled Python (3.11); everything else is installed with `pip`. The
+`--uv` flag swaps that backend for [`uv`](https://docs.astral.sh/uv/): it
+creates a uv-managed venv (`uv venv --python 3.11`, fetching a managed CPython
+if needed) and installs the same stack with `uv pip install`. Everything else —
+dual-mode source/execute, `bash`/`zsh`, idempotency, `--rebuild`, the
+post-install health check, and the zero-shell-pollution contract — is
+unchanged.
+
+- **uv must already be on `PATH`** (or loadable as a module — on Casper `uv`
+  and `conda` are *conflicting* modules, so only the one for the selected
+  backend is loaded). The script does **not** bootstrap uv for you; install it
+  per the [uv docs](https://docs.astral.sh/uv/getting-started/installation/)
+  or `module load uv` first.
+- The uv env gets its **own prefix** (`credit-env-uv`, `credit-env-casper-uv`)
+  so a uv build and a conda build can coexist. Activate it the standard venv
+  way: `source envs/credit-env-uv/bin/activate`.
+- `mpi4py` is still forced to a source build, via uv's `--no-binary mpi4py`
+  (uv does not honor pip's `PIP_NO_BINARY`).
+- **`derecho` is conda-only.** Its path needs a *non-Python* build dependency
+  (`libhwloc` + `pkg-config` from conda-forge) for the AWS OFI NCCL plugin and
+  conda `activate.d` hooks — neither of which uv can provide — so `--uv` on
+  `derecho` stops with an error.
+
+```bash
+# build (first time) or activate a uv-backed env into your current shell:
+source envs/config_env.sh --uv
+
+# one-shot build under uv:
+./envs/config_env.sh --uv --rebuild
+```
 
 ## Examples
 
