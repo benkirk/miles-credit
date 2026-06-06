@@ -84,7 +84,7 @@ USAGE
 #----------------------------------------------------------------------------
 # Run a command quietly unless --verbose was given.
 run_quiet() {
-    if [ "${VERBOSE}" -eq 1 ]; then
+    if [ "${CREDIT_VERBOSE}" -eq 1 ]; then
         "$@"
     else
         "$@" >/dev/null 2>&1
@@ -92,7 +92,7 @@ run_quiet() {
 }
 
 #----------------------------------------------------------------------------
-# Parse "$@" into VERBOSE / REBUILD / __ce_show_help / __ce_bad_arg.
+# Parse "$@" into CREDIT_VERBOSE / REBUILD / __ce_show_help / __ce_bad_arg.
 # Called at top level so "$@" is the script's args.
 # Works whether SOURCED or EXECUTED, under bash & zsh.  We read "$@" directly:
 # verified correct in both shells when args are supplied to `source`.
@@ -100,12 +100,12 @@ run_quiet() {
 # reset positional parameters, so the caller's $@ is visible here.  Normal
 # interactive use (empty $@) is unaffected.
 __ce_parse_args() {
-    VERBOSE=0
+    CREDIT_VERBOSE=0
     REBUILD=0
-    BACKEND="conda"
-    PYTHON_VERSION="3.11"
-    TORCH_VERSION=""          # empty = use host_config.sh default (2.10.0)
-    CUDA_VERSION=""           # empty = use host_config.sh per-host default
+    CREDIT_BACKEND="conda"
+    CREDIT_PYTHON_VERSION="3.11"
+    CREDIT_TORCH_VERSION=""          # empty = use host_config.sh default (2.10.0)
+    CREDIT_CUDA_VERSION=""           # empty = use host_config.sh per-host default
     __ce_show_help=0
     __ce_bad_arg=""
     __ce_expect_val=""        # name of the option whose value the NEXT token is
@@ -116,23 +116,23 @@ __ce_parse_args() {
             case "${__ce_arg}" in
                 -*) __ce_bad_arg="--${__ce_expect_val} (missing value)" ;;
                 *)  case "${__ce_expect_val}" in
-                        python-version) PYTHON_VERSION="${__ce_arg}" ;;
-                        torch-version)  TORCH_VERSION="${__ce_arg}" ;;
-                        cuda-version)   CUDA_VERSION="${__ce_arg}" ;;
+                        python-version) CREDIT_PYTHON_VERSION="${__ce_arg}" ;;
+                        torch-version)  CREDIT_TORCH_VERSION="${__ce_arg}" ;;
+                        cuda-version)   CREDIT_CUDA_VERSION="${__ce_arg}" ;;
                     esac ;;
             esac
             __ce_expect_val=""
             continue
         fi
         case "${__ce_arg}" in
-            --uv)                 BACKEND="uv" ;;
+            --uv)                 CREDIT_BACKEND="uv" ;;
             --python-version)     __ce_expect_val="python-version" ;;
-            --python-version=*)   PYTHON_VERSION="${__ce_arg#*=}" ;;
+            --python-version=*)   CREDIT_PYTHON_VERSION="${__ce_arg#*=}" ;;
             --torch-version)      __ce_expect_val="torch-version" ;;
-            --torch-version=*)    TORCH_VERSION="${__ce_arg#*=}" ;;
+            --torch-version=*)    CREDIT_TORCH_VERSION="${__ce_arg#*=}" ;;
             --cuda-version)       __ce_expect_val="cuda-version" ;;
-            --cuda-version=*)     CUDA_VERSION="${__ce_arg#*=}" ;;
-            --verbose|-v)         VERBOSE=1 ;;
+            --cuda-version=*)     CREDIT_CUDA_VERSION="${__ce_arg#*=}" ;;
+            --verbose|-v)         CREDIT_VERBOSE=1 ;;
             --rebuild|-r)         REBUILD=1 ;;
             --help|-h)            __ce_show_help=1 ;;
             "")                   : ;;
@@ -140,11 +140,11 @@ __ce_parse_args() {
         esac
     done
     # A trailing value-option with no following token (e.g. "--python-version"
-    # last) is reported here.  NOTE: empty TORCH_VERSION/CUDA_VERSION are VALID
+    # last) is reported here.  NOTE: empty CREDIT_TORCH_VERSION/CREDIT_CUDA_VERSION are VALID
     # (they mean "use the host default"), so only --python-version gets the
     # extra non-empty check below.
     [ -n "${__ce_expect_val}" ] && __ce_bad_arg="--${__ce_expect_val} (missing value)"
-    [ -n "${PYTHON_VERSION}" ]  || __ce_bad_arg="--python-version (missing value)"
+    [ -n "${CREDIT_PYTHON_VERSION}" ]  || __ce_bad_arg="--python-version (missing value)"
 }
 
 #----------------------------------------------------------------------------
@@ -158,8 +158,8 @@ __ce_setup_modules() {
     run_quiet module reset
     run_quiet module load gcc/14.3.0 ${__CE_CUDA_MODULE}   # <=1 extra token: portable
     # Load ONLY the backend tool's module.  On Casper the conda and uv modules
-    # conflict, so we never load both; ${BACKEND} is "conda" or "uv".
-    run_quiet module load "${BACKEND}"
+    # conflict, so we never load both; ${CREDIT_BACKEND} is "conda" or "uv".
+    run_quiet module load "${CREDIT_BACKEND}"
     run_quiet module list
 }
 
@@ -167,7 +167,7 @@ __ce_setup_modules() {
 # Locate the selected backend (conda or uv) and initialize it if needed.
 # Returns 1 if the backend tool cannot be found.
 __ce_ensure_backend() {
-    if [ "${BACKEND}" = "uv" ]; then
+    if [ "${CREDIT_BACKEND}" = "uv" ]; then
         __ce_ensure_uv
     else
         __ce_ensure_conda
@@ -234,7 +234,7 @@ __ce_maybe_rebuild() {
 # Activate the environment if it already exists.  Returns 0 (activated) so the
 # caller can short-circuit, or 1 if there is nothing to activate.
 __ce_activate_if_exists() {
-    if [ "${BACKEND}" = "uv" ]; then
+    if [ "${CREDIT_BACKEND}" = "uv" ]; then
         [ -f "${ENV_DIR}/bin/activate" ] || return 1
         echo "Activating ${ENV_DIR}"
         source "${ENV_DIR}/bin/activate"   # side effect propagates to the caller
@@ -267,7 +267,7 @@ __ce_source_runtime_hooks() {
 # host-policy vars/functions are owned by host_config.sh and cleaned up by its
 # __ce_host_config_cleanup (invoked below), so they are NOT listed here.
 __ce_cleanup() {
-    unset VERBOSE REBUILD BACKEND PYTHON_VERSION TORCH_VERSION CUDA_VERSION \
+    unset CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
           TARGET_HOST CONDA_ROOT \
           __ce_show_help __ce_bad_arg __ce_arg __ce_expect_val __ce_status 2>/dev/null
     unset -f __ce_usage run_quiet __ce_parse_args __ce_setup_modules \
@@ -314,8 +314,8 @@ __ce_run() {
     # doubles as the post-build success gate.  Finally source any runtime hooks
     # so every `source config_env.sh` sets the NCCL/CXI + plugin-discovery env.
     if [ ! -d "${ENV_DIR}" ]; then
-        BACKEND="${BACKEND}" VERBOSE="${VERBOSE}" PYTHON_VERSION="${PYTHON_VERSION}" \
-            TORCH_VERSION="${TORCH_VERSION}" CUDA_VERSION="${CUDA_VERSION}" \
+        CREDIT_BACKEND="${CREDIT_BACKEND}" CREDIT_VERBOSE="${CREDIT_VERBOSE}" CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION}" \
+            CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION}" CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION}" \
             "${SCRIPTDIR}/create_env.sh" || {
                 echo "config_env.sh: environment build failed." >&2
                 return 1

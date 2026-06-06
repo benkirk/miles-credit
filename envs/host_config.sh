@@ -8,11 +8,11 @@
 # entry point) and create_env.sh (the build subprocess).  Keeping it here means
 # host policy stays a SINGLE SOURCE OF TRUTH: both processes derive the same
 # ENV_DIR / pip target / module set from the same code given the same
-# TARGET_HOST + BACKEND, with no fragile cross-process export list.
+# TARGET_HOST + CREDIT_BACKEND, with no fragile cross-process export list.
 #
-# The sourcer MUST set SCRIPTDIR (the envs/ dir), BACKEND, and PYTHON_VERSION
-# before calling __ce_host_config; it reads TARGET_HOST too.  TORCH_VERSION and
-# CUDA_VERSION are optional inputs (empty => host/global defaults apply).
+# The sourcer MUST set SCRIPTDIR (the envs/ dir), CREDIT_BACKEND, and CREDIT_PYTHON_VERSION
+# before calling __ce_host_config; it reads TARGET_HOST too.  CREDIT_TORCH_VERSION and
+# CREDIT_CUDA_VERSION are optional inputs (empty => host/global defaults apply).
 #
 # Like config_env.sh this must be portable to BOTH bash and zsh (no associative
 # arrays; no reliance on word-splitting).
@@ -102,9 +102,9 @@ __ce_host_config() {
     # Resolve the CUDA version CLI > per-host default > global default; the torch
     # version is a single global default overridable by --torch-version.  Strip
     # the dot for the wheel tag (12.6 -> cu126; ${//} works in bash AND zsh).
-    if [ "${__CE_WANT_CUDA}" -eq 1 ] || [ -n "${CUDA_VERSION}" ]; then
-        __CE_TORCH_VER="${TORCH_VERSION:-2.10.0}"
-        __CE_CUDA_VER="${CUDA_VERSION:-${__CE_DEFAULT_CUDA:-12.6}}"
+    if [ "${__CE_WANT_CUDA}" -eq 1 ] || [ -n "${CREDIT_CUDA_VERSION}" ]; then
+        __CE_TORCH_VER="${CREDIT_TORCH_VERSION:-2.10.0}"
+        __CE_CUDA_VER="${CREDIT_CUDA_VERSION:-${__CE_DEFAULT_CUDA:-12.6}}"
         __CE_CUDA_TAG="cu${__CE_CUDA_VER//./}"
         PIP_EXTRA_URL="https://download.pytorch.org/whl/${__CE_CUDA_TAG}"
         __CE_TORCH_SPEC="torch==${__CE_TORCH_VER}+${__CE_CUDA_TAG}"
@@ -113,11 +113,11 @@ __ce_host_config() {
 
     # Encode the Python version into the prefix (always, even the default) so
     # envs built with different Python versions coexist and never cross-detect.
-    ENV_NAME="${ENV_NAME}-py${PYTHON_VERSION}"
+    ENV_NAME="${ENV_NAME}-py${CREDIT_PYTHON_VERSION}"
 
     # Give the uv env its own prefix so a uv build and a conda build can coexist
     # and the per-backend existence tests never cross-detect one another.
-    [ "${BACKEND}" = "uv" ] && ENV_NAME="${ENV_NAME}-uv"
+    [ "${CREDIT_BACKEND}" = "uv" ] && ENV_NAME="${ENV_NAME}-uv"
 
     ENV_DIR="${SCRIPTDIR}/${ENV_NAME}"
 }

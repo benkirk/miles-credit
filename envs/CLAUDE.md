@@ -76,10 +76,22 @@ script is sourced into interactive shells and PBS run scripts):
 - **Prefix encodes backend AND Python version** so independent builds coexist and
   existence tests never cross-detect: `credit-env[-host]-py<X.Y>[-uv]` (e.g.
   `credit-env-py3.11`, `credit-env-derecho-py3.12-uv`). The version is **always**
-  present, even the default 3.11. `__ce_host_config` builds this from `BACKEND` +
-  `PYTHON_VERSION` (a `config_env.sh`-owned input, default 3.11, threaded to the
-  `create_env.sh` subprocess and used for `conda create python=…` / `uv venv
-  --python …`). Add the `-py…` segment in exactly one place (`__ce_host_config`).
+  present, even the default 3.11. `__ce_host_config` builds this from
+  `CREDIT_BACKEND` + `CREDIT_PYTHON_VERSION` (a `config_env.sh`-owned input,
+  default 3.11, threaded to the `create_env.sh` subprocess and used for `conda
+  create python=…` / `uv venv --python …`). Add the `-py…` segment in exactly one
+  place (`__ce_host_config`).
+- **Input vars are `CREDIT_*`-namespaced — do not rename them back to bare names.**
+  The cross-process inputs (`CREDIT_BACKEND`, `CREDIT_VERBOSE`,
+  `CREDIT_PYTHON_VERSION`, `CREDIT_TORCH_VERSION`, `CREDIT_CUDA_VERSION`) carry a
+  `CREDIT_` prefix specifically so a loaded module can't shadow them. The original
+  bare `CUDA_VERSION` collided with the env var the **`cuda/12.9.0` module exports**
+  (`CUDA_VERSION=12.9.0`): `__ce_host_config` read it instead of the intended host
+  default `12.9`, producing the bogus wheel tag `cu1290` and an unresolvable
+  `torch==…+cu1290` pin — derecho-only, so CI (default host, no `cuda` module)
+  never saw it. When you add a new input, give it a `CREDIT_` prefix and thread it
+  through all three files (parse in `config_env.sh`, pass at the subprocess call,
+  read in `create_env.sh`/`host_config.sh`).
 - **uv must provision its own interpreter:** the `uv venv` call uses
   `--managed-python` so it never adopts whatever `python<X.Y>` the caller's shell
   exposes (an active conda env, a system python). Without it the venv symlinks an
