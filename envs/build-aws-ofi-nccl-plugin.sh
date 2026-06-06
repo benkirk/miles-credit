@@ -1,7 +1,13 @@
 #!/bin/bash -eu
 
+# Pull in the central default versions (single source of truth) when present, so
+# the standalone default matches what create_env.sh exports.  Guarded + with a
+# literal last resort so this script still runs if the file is ever absent.
+SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
+[ -f "${SCRIPTDIR}/default_versions.sh" ] && source "${SCRIPTDIR}/default_versions.sh"
+
 # Set environment variables for dependencies
-AWS_OFI_NCCL_VERSION=${AWS_OFI_NCCL_VERSION:-"v1.19.2"}
+AWS_OFI_NCCL_VERSION="${AWS_OFI_NCCL_VERSION:-${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION:-v1.19.2}}"
 OFI_HOME=${NCAR_ROOT_LIBFABRIC}
 
 # The plugin and its non-Python build dependencies (hwloc) install under a

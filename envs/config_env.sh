@@ -39,6 +39,9 @@ SCRIPTDIR="$(realpath "$(dirname "$(realpath "${SCRIPT_PATH}")")")"
 # Per-host policy lives in a sibling file, SOURCED here (so the entry point and
 # the build subprocess share ONE source of truth).  Must be sourced at top
 # level: __ce_host_config sets scalars the caller's shell then activates from.
+# host_config.sh in turn sources default_versions.sh, so the CREDIT_DEFAULT_*
+# defaults (consumed by __ce_parse_args / __ce_usage below) are in scope after
+# this line; its cleanup is reached via __ce_host_config_cleanup.
 source "${SCRIPTDIR}/host_config.sh"
 
 
@@ -58,21 +61,22 @@ Usage: [source] config_env.sh [--uv] [--python-version X.Y]
                   uv must already be on PATH (or available as a module); it is
                   not bootstrapped for you.
   --python-version X.Y
-                  Python version to build the environment with (default 3.11).
+                  Python version to build the environment with
+                  (default ${CREDIT_DEFAULT_PYTHON_VERSION}).
                   Encoded into the env prefix (e.g. credit-env-py3.12) so
                   multiple versions coexist.  Accepts '--python-version 3.12'
                   or '--python-version=3.12'.
   --torch-version X.Y.Z
                   torch version to pin on the pip line for the CUDA-enabled
-                  hosts (default 2.10.0).  Combined with --cuda-version into a
-                  'torch==<ver>+cu<tag>' spec plus the matching PyTorch
-                  --extra-index-url.  Accepts the '=' form too.
+                  hosts (default ${CREDIT_DEFAULT_TORCH_VERSION}).  Combined with
+                  --cuda-version into a 'torch==<ver>+cu<tag>' spec plus the
+                  matching PyTorch --extra-index-url.  Accepts the '=' form too.
   --cuda-version X.Y
                   CUDA build of torch to install on the CUDA-enabled hosts,
                   e.g. '12.6' -> the cu126 PyTorch wheels.  Defaults per host
-                  (casper 12.6, derecho 12.9); override for any host.  On the
-                  portable 'default' host, supplying this opts into a CUDA
-                  build (otherwise plain torch from PyPI is used).
+                  (casper ${CREDIT_DEFAULT_CUDA_VERSION}, derecho 12.9); override
+                  for any host.  On the portable 'default' host, supplying this
+                  opts into a CUDA build (otherwise plain torch from PyPI is used).
   --verbose, -v   Show module/backend setup output (quiet by default).
   --rebuild, -r   Rebuild the environment even if it already exists.
                   The existing env is moved aside and removed in the
@@ -102,10 +106,10 @@ run_quiet() {
 __ce_parse_args() {
     CREDIT_VERBOSE=0
     REBUILD=0
-    CREDIT_BACKEND="conda"
-    CREDIT_PYTHON_VERSION="3.11"
-    CREDIT_TORCH_VERSION=""          # empty = use host_config.sh default (2.10.0)
-    CREDIT_CUDA_VERSION=""           # empty = use host_config.sh per-host default
+    CREDIT_BACKEND="${CREDIT_DEFAULT_BACKEND}"          # default_versions.sh
+    CREDIT_PYTHON_VERSION="${CREDIT_DEFAULT_PYTHON_VERSION}"  # default_versions.sh
+    CREDIT_TORCH_VERSION=""          # empty = use default_versions.sh default
+    CREDIT_CUDA_VERSION=""           # empty = use host/global default
     __ce_show_help=0
     __ce_bad_arg=""
     __ce_expect_val=""        # name of the option whose value the NEXT token is

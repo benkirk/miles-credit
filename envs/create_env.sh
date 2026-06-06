@@ -16,11 +16,11 @@
 # "success".
 #
 # Inputs (from the environment the parent exports / inherits):
-#   CREDIT_BACKEND        - "conda" (default) or "uv"
+#   CREDIT_BACKEND        - "conda" or "uv" (default from default_versions.sh)
 #   CREDIT_VERBOSE        - 0/1 (forwarded to the probe; also echoes the pip command)
-#   CREDIT_PYTHON_VERSION - Python to build with (default 3.11)
-#   CREDIT_TORCH_VERSION  - optional torch version pin (empty -> host_config default)
-#   CREDIT_CUDA_VERSION   - optional CUDA build of torch (empty -> host_config default)
+#   CREDIT_PYTHON_VERSION - Python to build with (default from default_versions.sh)
+#   CREDIT_TORCH_VERSION  - optional torch version pin (empty -> default_versions.sh default)
+#   CREDIT_CUDA_VERSION   - optional CUDA build of torch (empty -> host/global default)
 #   NCAR_HOST      - host id (-> TARGET_HOST); already in the HPC environment
 #   plus the module environment the parent loaded (PATH/CC/CUDA_HOME/...),
 #   which IS inherited by this subprocess.
@@ -34,9 +34,9 @@
 SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPTDIR}/host_config.sh"
 
-CREDIT_BACKEND="${CREDIT_BACKEND:-conda}"
+CREDIT_BACKEND="${CREDIT_BACKEND:-${CREDIT_DEFAULT_BACKEND}}"          # default_versions.sh (via host_config.sh)
 CREDIT_VERBOSE="${CREDIT_VERBOSE:-0}"
-CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION:-3.11}"
+CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION:-${CREDIT_DEFAULT_PYTHON_VERSION}}"  # default_versions.sh
 CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION:-}"
 CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION:-}"
 TARGET_HOST="${NCAR_HOST:-default}"
@@ -57,8 +57,9 @@ fi
 
 
 #-------------------------------------------------------
-# create a minimal isolated environment with a controlled Python (default 3.11;
-# set by --python-version, passed in as CREDIT_PYTHON_VERSION)
+# create a minimal isolated environment with a controlled Python (the default
+# lives in default_versions.sh; set by --python-version, passed in as
+# CREDIT_PYTHON_VERSION)
 if [ "${CREDIT_BACKEND}" = "uv" ]; then
     # Force a uv-managed standalone CPython (--managed-python) so the venv
     # never adopts an interpreter the caller's shell merely happens to
@@ -128,7 +129,7 @@ if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
     # CUDA-aware hwloc there when the system lacks the dev headers, and makes
     # its own hwloc prefix/rpath decision.  Fail loudly: a broken plugin must
     # NOT report success.
-    export AWS_OFI_NCCL_VERSION="v1.19.2"
+    export AWS_OFI_NCCL_VERSION="${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}"   # default_versions.sh
     export AWS_OFI_PLUGIN_HOME="${ENV_DIR}/dependencies"
     ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh || {
         echo "create_env.sh: aws-ofi-nccl plugin build failed." >&2

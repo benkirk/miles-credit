@@ -10,13 +10,23 @@
 # ENV_DIR / pip target / module set from the same code given the same
 # TARGET_HOST + CREDIT_BACKEND, with no fragile cross-process export list.
 #
-# The sourcer MUST set SCRIPTDIR (the envs/ dir), CREDIT_BACKEND, and CREDIT_PYTHON_VERSION
-# before calling __ce_host_config; it reads TARGET_HOST too.  CREDIT_TORCH_VERSION and
-# CREDIT_CUDA_VERSION are optional inputs (empty => host/global defaults apply).
+# The sourcer MUST set SCRIPTDIR (the envs/ dir) BEFORE sourcing this file (it
+# is used immediately, below, to pull in default_versions.sh) and set
+# CREDIT_BACKEND and CREDIT_PYTHON_VERSION before calling __ce_host_config; it
+# reads TARGET_HOST too.  CREDIT_TORCH_VERSION and CREDIT_CUDA_VERSION are
+# optional inputs (empty => host/global defaults apply).
 #
 # Like config_env.sh this must be portable to BOTH bash and zsh (no associative
 # arrays; no reliance on word-splitting).
 #----------------------------------------------------------------------------
+
+
+# Central, single source of truth for the DEFAULT versions (python/torch/CUDA/
+# AWS plugin) and the default backend.  Sourcing it here is the one hop that
+# delivers the CREDIT_DEFAULT_* constants to BOTH config_env.sh and
+# create_env.sh, since both source this file at top level before they need a
+# default.  __ce_host_config_cleanup chains to its cleanup.
+source "${SCRIPTDIR}/default_versions.sh"
 
 
 #----------------------------------------------------------------------------
@@ -46,7 +56,8 @@
 # CUDA/torch selection (resolution order: CLI flag > per-host default > global):
 #   __CE_WANT_CUDA   - 0/1 (does this host install a CUDA torch build?)
 #   __CE_DEFAULT_CUDA- per-host default CUDA version, or "" to use the global one
-#   global defaults  - torch 2.10.0, CUDA 12.6 (the constants below)
+#   global defaults  - torch + CUDA defaults come from default_versions.sh
+#                      (CREDIT_DEFAULT_TORCH_VERSION / CREDIT_DEFAULT_CUDA_VERSION)
 # The 'default' host installs a CUDA build only if the user passes --cuda-version.
 #
 # ADDING A HOST = add ONE case arm here.  Both config_env.sh's module-setup
@@ -78,7 +89,7 @@ __ce_host_config() {
             __CE_USE_MODULES=1
             PIP_TARGET_SPEC=".[distributed]"
             __CE_EXPECT_NCCL=1
-            __CE_WANT_CUDA=1          # default CUDA -> global default (12.6)
+            __CE_WANT_CUDA=1          # default CUDA -> CREDIT_DEFAULT_CUDA_VERSION
             ;;
 
         "derecho")
@@ -103,8 +114,8 @@ __ce_host_config() {
     # version is a single global default overridable by --torch-version.  Strip
     # the dot for the wheel tag (12.6 -> cu126; ${//} works in bash AND zsh).
     if [ "${__CE_WANT_CUDA}" -eq 1 ] || [ -n "${CREDIT_CUDA_VERSION}" ]; then
-        __CE_TORCH_VER="${CREDIT_TORCH_VERSION:-2.10.0}"
-        __CE_CUDA_VER="${CREDIT_CUDA_VERSION:-${__CE_DEFAULT_CUDA:-12.6}}"
+        __CE_TORCH_VER="${CREDIT_TORCH_VERSION:-${CREDIT_DEFAULT_TORCH_VERSION}}"
+        __CE_CUDA_VER="${CREDIT_CUDA_VERSION:-${__CE_DEFAULT_CUDA:-${CREDIT_DEFAULT_CUDA_VERSION}}}"
         __CE_CUDA_TAG="cu${__CE_CUDA_VER//./}"
         PIP_EXTRA_URL="https://download.pytorch.org/whl/${__CE_CUDA_TAG}"
         __CE_TORCH_SPEC="torch==${__CE_TORCH_VER}+${__CE_CUDA_TAG}"
@@ -133,5 +144,8 @@ __ce_host_config_cleanup() {
           __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
           __CE_WANT_CUDA __CE_DEFAULT_CUDA 2>/dev/null
     unset -f __ce_host_config 2>/dev/null
+    # Clean up the default_versions.sh state we sourced in (defensive: it may be
+    # absent if sourcing failed).  Self-unsets the CREDIT_DEFAULT_* constants.
+    command -v __ce_default_versions_cleanup >/dev/null 2>&1 && __ce_default_versions_cleanup
     unset -f __ce_host_config_cleanup 2>/dev/null   # self-unset LAST
 }
