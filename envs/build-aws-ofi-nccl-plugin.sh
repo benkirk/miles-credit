@@ -3,28 +3,54 @@
 # Set environment variables for dependencies
 AWS_OFI_NCCL_VERSION=${AWS_OFI_NCCL_VERSION:-"v1.19.2"}
 OFI_HOME=${NCAR_ROOT_LIBFABRIC}
-AWS_OFI_PLUGIN_HOME=${CONDA_PREFIX}
 
-# Make a conda-provided hwloc.pc visible to pkg-config when present.
-export PKG_CONFIG_PATH="${CONDA_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+# The plugin and its non-Python build dependencies (hwloc) install under a
+# single per-environment "dependencies" prefix, INDEPENDENT of the Python
+# packaging backend (conda or uv).  config_env.sh exports AWS_OFI_PLUGIN_HOME
+# explicitly; the fallback derives <active-env>/dependencies for standalone use.
+AWS_OFI_PLUGIN_HOME="${AWS_OFI_PLUGIN_HOME:-${VIRTUAL_ENV:-${CONDA_PREFIX:-}}/dependencies}"
+mkdir -p "${AWS_OFI_PLUGIN_HOME}"
 
-# hwloc: prefer the system/module dev headers; fall back to the conda copy.
-# When we build against the conda hwloc, bake an rpath to it so the plugin
-# loads THAT hwloc at runtime (aws-ofi-nccl's configure adds -L but no -rpath).
-# This probe must agree with config_env.sh, so it runs in the same env.
+# hwloc supplies the build headers (and a runtime lib) for aws-ofi-nccl.  Prefer
+# the system/module dev headers; otherwise provision a standalone CUDA-aware
+# hwloc in its OWN conda env under the dependencies prefix.  When we build
+# against that hwloc, bake an rpath to it so the plugin loads THAT hwloc at
+# runtime (aws-ofi-nccl's configure adds -L but no -rpath).
 HWLOC_CONFIGURE_ARG=""     # --with-hwloc=... or empty (let configure search)
-HWLOC_RPATH_LDFLAGS=""     # -Wl,-rpath for the conda libdir, when used
+HWLOC_RPATH_LDFLAGS=""     # -Wl,-rpath for the hwloc libdir, when used
 if printf '#include <hwloc.h>\n' | ${CC:-gcc} -E -x c - >/dev/null 2>&1; then
     echo "==> using system/module hwloc (configure auto-detect; no rpath needed)"
-elif [ -f "${CONDA_PREFIX}/include/hwloc.h" ] \
-     || { command -v pkg-config >/dev/null 2>&1 && pkg-config --exists hwloc 2>/dev/null; }; then
-    echo "==> using conda hwloc at ${CONDA_PREFIX}"
-    HWLOC_CONFIGURE_ARG="--with-hwloc=${CONDA_PREFIX}"
-    HWLOC_RPATH_LDFLAGS="-Wl,-rpath,${CONDA_PREFIX}/lib"
 else
-    echo "ERROR: no hwloc.h on system path and none in ${CONDA_PREFIX}." >&2
-    echo "       install one (conda install -c conda-forge libhwloc) and retry." >&2
-    exit 1
+    HWLOC_PREFIX="${AWS_OFI_PLUGIN_HOME}/hwloc-env"
+    if [ ! -f "${HWLOC_PREFIX}/include/hwloc.h" ]; then
+        echo "==> no system hwloc.h; provisioning a standalone CUDA-aware hwloc in ${HWLOC_PREFIX}"
+        # We only need the `conda` BINARY here to create an isolated build-deps
+        # env; we never ACTIVATE it, so this is fully independent of the uv/conda
+        # Python packaging backend the caller is using.  Load the module only if
+        # conda is not already on PATH (e.g. the uv backend).  conda and uv are
+        # *conflicting* modules on NCAR HPC, so we must drop uv first -- safe
+        # here in this child shell, where uv is not needed (the gcc/cuda modules
+        # the build relies on are unaffected).
+        if ! command -v conda >/dev/null 2>&1; then
+            type module >/dev/null 2>&1 || source /etc/profile.d/z00_modules.sh 2>/dev/null || true
+            module unload uv >/dev/null 2>&1 || true
+            module load conda >/dev/null 2>&1 || module try-load conda >/dev/null 2>&1 || true
+        fi
+        command -v conda >/dev/null 2>&1 || {
+            echo "ERROR: hwloc must be built but 'conda' is not available." >&2
+            echo "       'module load conda' (or install conda) and retry." >&2
+            exit 1
+        }
+        # CONDA_OVERRIDE_CUDA lets the cuda129 build resolve on a driverless
+        # login node, where conda's __cuda virtual package is otherwise absent.
+        CONDA_OVERRIDE_CUDA="12.9" conda create --yes --prefix "${HWLOC_PREFIX}" \
+              -c conda-forge "libhwloc=*=cuda129*" cuda-version=12.9 pkg-config
+    else
+        echo "==> reusing standalone hwloc at ${HWLOC_PREFIX}"
+    fi
+    HWLOC_CONFIGURE_ARG="--with-hwloc=${HWLOC_PREFIX}"
+    HWLOC_RPATH_LDFLAGS="-Wl,-rpath,${HWLOC_PREFIX}/lib"
+    export PKG_CONFIG_PATH="${HWLOC_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 fi
 
 # Build the OFI Plugin

@@ -85,20 +85,6 @@ jobs:
           printf '%s\n' "$out" | grep -q -- '--uv' || { echo "FAIL: no --uv in usage"; exit 1; }
           echo "OK: --uv --help"
 
-      - name: "--uv on derecho is rejected (execute under ${{ matrix.shell }})"
-        env:
-          NCAR_HOST: derecho
-        run: |
-          # The scope guard must fail (rc=1) before any build/backend work.
-          set +e
-          out=$(${{ matrix.shell }} envs/config_env.sh --uv 2>&1); rc=$?
-          set -e
-          printf '%s\n' "$out"
-          [ "$rc" -eq 1 ] || { echo "FAIL: derecho+uv rc=$rc (want 1)"; exit 1; }
-          printf '%s\n' "$out" | grep -q 'not supported on derecho' \
-            || { echo "FAIL: no derecho guard message"; exit 1; }
-          echo "OK: --uv rejected on derecho"
-
       - name: "Bad argument (execute under ${{ matrix.shell }})"
         run: |
           # help/bad-arg map to status 2 -> the driver returns/exits 0.
@@ -139,8 +125,9 @@ jobs:
   # are isolated to the derived CE_* vars, the if:-guarded setup steps, and a
   # single branch in the tooling step. Honest by design: a leg goes red wherever
   # the real build cannot complete. uv is provided on PATH (the script never
-  # bootstraps it), matching how Casper exposes uv via a module. uv scope is
-  # default/casper (derecho stays conda); this portable leg uses `default`.
+  # bootstraps it), matching how Casper exposes uv via a module. uv is supported
+  # on all hosts; derecho's extra build steps need Cray modules/hardware that
+  # free CI lacks, so this portable leg uses `default`.
   # --------------------------------------------------------------------------
   full-build:
     name: build / ${{ matrix.backend }} / ${{ matrix.os }} / ${{ matrix.shell }}
