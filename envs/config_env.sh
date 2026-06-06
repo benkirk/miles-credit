@@ -7,10 +7,17 @@
 #
 # This script is intended to be idempotent and both sourceable or runnable.
 #
-# Structure: generic scaffolding + per-host policy + build recipe are split
-# into functions (Section 2).  The dual-mode return/exit must happen at the
-# top level of a sourced file, so functions report status via return codes and
-# a single thin driver (Section 3) issues the one `return N || exit N`.
+# Structure: this file is the dual-mode ENTRY POINT -- it does modules, env
+# vars, and activation in the caller's shell, and orchestrates the rest.  Two
+# concerns live in sibling files so this one stays small and the build can grow
+# without touching the delicate dual-mode/no-pollution plumbing:
+#   host_config.sh - per-host policy (single source of truth; SOURCED by both
+#                    this file and create_env.sh)
+#   create_env.sh  - the build recipe (EXECUTE-ONLY; invoked as a SUBPROCESS
+#                    when the env is absent, so it pollutes nothing)
+# The dual-mode return/exit must happen at the top level of a sourced file, so
+# functions report status via return codes and a single thin driver (Section 3)
+# issues the one `return N || exit N`.
 #----------------------------------------------------------------------------
 
 
@@ -29,6 +36,14 @@ else
 fi
 SCRIPTDIR="$(realpath "$(dirname "$(realpath "${SCRIPT_PATH}")")")"
 
+# Per-host policy lives in a sibling file, SOURCED here (so the entry point and
+# the build subprocess share ONE source of truth).  Must be sourced at top
+# level: __ce_host_config sets scalars the caller's shell then activates from.
+# host_config.sh in turn sources default_versions.sh, so the CREDIT_DEFAULT_*
+# defaults (consumed by __ce_parse_args / __ce_usage below) are in scope after
+# this line; its cleanup is reached via __ce_host_config_cleanup.
+source "${SCRIPTDIR}/host_config.sh"
+
 
 #============================================================================
 # SECTION 2 - function definitions
@@ -37,12 +52,31 @@ SCRIPTDIR="$(realpath "$(dirname "$(realpath "${SCRIPT_PATH}")")")"
 #----------------------------------------------------------------------------
 __ce_usage() {
     cat <<USAGE
-Usage: [source] config_env.sh [--uv] [--verbose] [--rebuild] [--help]
+Usage: [source] config_env.sh [--uv] [--python-version X.Y]
+                              [--torch-version X.Y.Z] [--cuda-version X.Y]
+                              [--verbose] [--rebuild] [--help]
 
   --uv            Use the 'uv' package installer and a uv-managed venv instead
                   of conda.  Supported on all hosts (default/casper/derecho).
                   uv must already be on PATH (or available as a module); it is
                   not bootstrapped for you.
+  --python-version X.Y
+                  Python version to build the environment with
+                  (default ${CREDIT_DEFAULT_PYTHON_VERSION}).
+                  Encoded into the env prefix (e.g. credit-env-py3.12) so
+                  multiple versions coexist.  Accepts '--python-version 3.12'
+                  or '--python-version=3.12'.
+  --torch-version X.Y.Z
+                  torch version to pin on the pip line for the CUDA-enabled
+                  hosts (default ${CREDIT_DEFAULT_TORCH_VERSION}).  Combined with
+                  --cuda-version into a 'torch==<ver>+cu<tag>' spec plus the
+                  matching PyTorch --extra-index-url.  Accepts the '=' form too.
+  --cuda-version X.Y
+                  CUDA build of torch to install on the CUDA-enabled hosts,
+                  e.g. '12.6' -> the cu126 PyTorch wheels.  Defaults per host
+                  (casper ${CREDIT_DEFAULT_CUDA_VERSION}, derecho 12.9); override
+                  for any host.  On the portable 'default' host, supplying this
+                  opts into a CUDA build (otherwise plain torch from PyPI is used).
   --verbose, -v   Show module/backend setup output (quiet by default).
   --rebuild, -r   Rebuild the environment even if it already exists.
                   The existing env is moved aside and removed in the
@@ -54,7 +88,7 @@ USAGE
 #----------------------------------------------------------------------------
 # Run a command quietly unless --verbose was given.
 run_quiet() {
-    if [ "${VERBOSE}" -eq 1 ]; then
+    if [ "${CREDIT_VERBOSE}" -eq 1 ]; then
         "$@"
     else
         "$@" >/dev/null 2>&1
@@ -62,7 +96,7 @@ run_quiet() {
 }
 
 #----------------------------------------------------------------------------
-# Parse "$@" into VERBOSE / REBUILD / __ce_show_help / __ce_bad_arg.
+# Parse "$@" into CREDIT_VERBOSE / REBUILD / __ce_show_help / __ce_bad_arg.
 # Called at top level so "$@" is the script's args.
 # Works whether SOURCED or EXECUTED, under bash & zsh.  We read "$@" directly:
 # verified correct in both shells when args are supplied to `source`.
@@ -70,87 +104,51 @@ run_quiet() {
 # reset positional parameters, so the caller's $@ is visible here.  Normal
 # interactive use (empty $@) is unaffected.
 __ce_parse_args() {
-    VERBOSE=0
+    CREDIT_VERBOSE=0
     REBUILD=0
-    BACKEND="conda"
+    CREDIT_BACKEND="${CREDIT_DEFAULT_BACKEND}"          # default_versions.sh
+    CREDIT_PYTHON_VERSION="${CREDIT_DEFAULT_PYTHON_VERSION}"  # default_versions.sh
+    CREDIT_TORCH_VERSION=""          # empty = use default_versions.sh default
+    CREDIT_CUDA_VERSION=""           # empty = use host/global default
     __ce_show_help=0
     __ce_bad_arg=""
+    __ce_expect_val=""        # name of the option whose value the NEXT token is
     for __ce_arg in "$@"; do
+        # Consume the value of a space-separated option (e.g. --python-version X).
+        # Guard: a token starting with '-' is a flag, not a value -> missing value.
+        if [ -n "${__ce_expect_val}" ]; then
+            case "${__ce_arg}" in
+                -*) __ce_bad_arg="--${__ce_expect_val} (missing value)" ;;
+                *)  case "${__ce_expect_val}" in
+                        python-version) CREDIT_PYTHON_VERSION="${__ce_arg}" ;;
+                        torch-version)  CREDIT_TORCH_VERSION="${__ce_arg}" ;;
+                        cuda-version)   CREDIT_CUDA_VERSION="${__ce_arg}" ;;
+                    esac ;;
+            esac
+            __ce_expect_val=""
+            continue
+        fi
         case "${__ce_arg}" in
-            --uv)         BACKEND="uv" ;;
-            --verbose|-v) VERBOSE=1 ;;
-            --rebuild|-r) REBUILD=1 ;;
-            --help|-h)    __ce_show_help=1 ;;
-            "")           : ;;
-            *)            __ce_bad_arg="${__ce_arg}" ;;
+            --uv)                 CREDIT_BACKEND="uv" ;;
+            --python-version)     __ce_expect_val="python-version" ;;
+            --python-version=*)   CREDIT_PYTHON_VERSION="${__ce_arg#*=}" ;;
+            --torch-version)      __ce_expect_val="torch-version" ;;
+            --torch-version=*)    CREDIT_TORCH_VERSION="${__ce_arg#*=}" ;;
+            --cuda-version)       __ce_expect_val="cuda-version" ;;
+            --cuda-version=*)     CREDIT_CUDA_VERSION="${__ce_arg#*=}" ;;
+            --verbose|-v)         CREDIT_VERBOSE=1 ;;
+            --rebuild|-r)         REBUILD=1 ;;
+            --help|-h)            __ce_show_help=1 ;;
+            "")                   : ;;
+            *)                    __ce_bad_arg="${__ce_arg}" ;;
         esac
     done
-}
-
-#----------------------------------------------------------------------------
-# Single source of truth for ALL per-host policy.  Sets plain scalars
-# (portable to bash AND zsh; no associative arrays):
-#   ENV_NAME         - base name + optional host suffix
-#   ENV_DIR          - derived here, once
-#   PIP_EXTRA_URL    - bare extra-index URL, or "" (kept as a URL, not a
-#                      "--extra-index-url <url>" string, so we never depend
-#                      on word-splitting -- which differs between bash & zsh)
-#   PIP_TARGET_SPEC  - "."  or  ".[ncar-hpc-<host>]"
-#   __CE_CUDA_MODULE - ""  or  "cuda"  (<= 1 token, so unquoted expansion is
-#                      identical in bash and zsh)
-#   __CE_USE_MODULES - 0/1 (run the module dance?)
-#   NEEDS_OFI_PLUGIN - 0/1 (derecho-only post-build steps)
-#   __CE_EXPECT_NCCL - 0/1 (is NCCL expected here? -> health check requires it.
-#                      NCCL is optional in general but expected on the GPU/HPC
-#                      hosts we cannot exercise on free CI: casper, derecho)
-#
-# ADDING A HOST = add ONE case arm here.  Both the module-setup phase and the
-# pip/build phase read from this function, so nothing else needs editing.
-# (If a future host needs a module set unlike "gcc + <backend> [+ cuda]",
-# branch in __ce_setup_modules -- the one other host-aware spot.)
-__ce_host_config() {
-    ENV_NAME="credit-env"
-    PIP_EXTRA_URL=""
-    PIP_TARGET_SPEC="."
-    __CE_CUDA_MODULE=""
-    __CE_USE_MODULES=0
-    NEEDS_OFI_PLUGIN=0
-    __CE_EXPECT_NCCL=0
-
-    case "${TARGET_HOST}" in
-
-        "default")
-            # vanilla conda, nothing special; all defaults above apply
-            ;;
-
-        "casper")
-            ENV_NAME="${ENV_NAME}-${NCAR_HOST}"
-            __CE_USE_MODULES=1
-            PIP_EXTRA_URL="https://download.pytorch.org/whl/cu126"
-            PIP_TARGET_SPEC=".[ncar-hpc-${NCAR_HOST}]"
-            __CE_EXPECT_NCCL=1
-            ;;
-
-        "derecho")
-            ENV_NAME="${ENV_NAME}-${NCAR_HOST}"
-            __CE_USE_MODULES=1
-            __CE_CUDA_MODULE="cuda"
-            PIP_EXTRA_URL="https://download.pytorch.org/whl/cu129"
-            PIP_TARGET_SPEC=".[ncar-hpc-${NCAR_HOST}]"
-            NEEDS_OFI_PLUGIN=1
-            __CE_EXPECT_NCCL=1
-            ;;
-
-        *)
-            echo "ERROR: unhandled ${TARGET_HOST}?!!" >&2
-            ;;
-    esac
-
-    # Give the uv env its own prefix so a uv build and a conda build can coexist
-    # and the per-backend existence tests never cross-detect one another.
-    [ "${BACKEND}" = "uv" ] && ENV_NAME="${ENV_NAME}-uv"
-
-    ENV_DIR="${SCRIPTDIR}/${ENV_NAME}"
+    # A trailing value-option with no following token (e.g. "--python-version"
+    # last) is reported here.  NOTE: empty CREDIT_TORCH_VERSION/CREDIT_CUDA_VERSION are VALID
+    # (they mean "use the host default"), so only --python-version gets the
+    # extra non-empty check below.
+    [ -n "${__ce_expect_val}" ] && __ce_bad_arg="--${__ce_expect_val} (missing value)"
+    [ -n "${CREDIT_PYTHON_VERSION}" ]  || __ce_bad_arg="--python-version (missing value)"
 }
 
 #----------------------------------------------------------------------------
@@ -164,8 +162,8 @@ __ce_setup_modules() {
     run_quiet module reset
     run_quiet module load gcc/14.3.0 ${__CE_CUDA_MODULE}   # <=1 extra token: portable
     # Load ONLY the backend tool's module.  On Casper the conda and uv modules
-    # conflict, so we never load both; ${BACKEND} is "conda" or "uv".
-    run_quiet module load "${BACKEND}"
+    # conflict, so we never load both; ${CREDIT_BACKEND} is "conda" or "uv".
+    run_quiet module load "${CREDIT_BACKEND}"
     run_quiet module list
 }
 
@@ -173,7 +171,7 @@ __ce_setup_modules() {
 # Locate the selected backend (conda or uv) and initialize it if needed.
 # Returns 1 if the backend tool cannot be found.
 __ce_ensure_backend() {
-    if [ "${BACKEND}" = "uv" ]; then
+    if [ "${CREDIT_BACKEND}" = "uv" ]; then
         __ce_ensure_uv
     else
         __ce_ensure_conda
@@ -240,7 +238,7 @@ __ce_maybe_rebuild() {
 # Activate the environment if it already exists.  Returns 0 (activated) so the
 # caller can short-circuit, or 1 if there is nothing to activate.
 __ce_activate_if_exists() {
-    if [ "${BACKEND}" = "uv" ]; then
+    if [ "${CREDIT_BACKEND}" = "uv" ]; then
         [ -f "${ENV_DIR}/bin/activate" ] || return 1
         echo "Activating ${ENV_DIR}"
         source "${ENV_DIR}/bin/activate"   # side effect propagates to the caller
@@ -248,119 +246,6 @@ __ce_activate_if_exists() {
         [ -d "${ENV_DIR}" ] || return 1
         echo "Activating ${ENV_DIR}"
         conda activate "${ENV_DIR}"   # side effect propagates to the caller's shell
-    fi
-}
-
-#----------------------------------------------------------------------------
-# Build the environment from scratch (we only get here when ENV_DIR is absent).
-__ce_build_env() {
-    #-------------------------------------------------------
-    # create a minimal isolated environment with a controlled Python (3.11)
-    if [ "${BACKEND}" = "uv" ]; then
-        # Force a uv-managed standalone CPython (--managed-python) so the venv
-        # never adopts an interpreter the caller's shell merely happens to
-        # expose -- e.g. an active conda env (CONDA_PREFIX) or a system
-        # python3.11 on PATH -- whose lifecycle we do not control.  Without it,
-        # uv symlinks the venv's python at that external interpreter, which then
-        # dangles if it is later rebuilt or removed (breaking the uv env and the
-        # conda/uv "coexistence" guarantee).
-        uv venv --managed-python --python 3.11 "${ENV_DIR}" || {
-            echo "config_env.sh: 'uv venv' failed." >&2
-            return 1
-        }
-        source "${ENV_DIR}/bin/activate" || {
-            echo "config_env.sh: activating uv venv '${ENV_DIR}' failed." >&2
-            return 1
-        }
-    else
-        conda create \
-              --yes \
-              --prefix "${ENV_DIR}" \
-              python=3.11 || {
-            echo "config_env.sh: 'conda create' failed." >&2
-            return 1
-        }
-
-        conda activate "${ENV_DIR}" || {
-            echo "config_env.sh: 'conda activate ${ENV_DIR}' failed." >&2
-            return 1
-        }
-    fi
-
-    #-------------------------------------------------------
-    # install the Python stack, forcing a source build of mpi4py with the host
-    # compilers.  Build the command via `set --` (a function-local positional
-    # list) so expansion is identical under bash and zsh -- no unquoted
-    # word-splitting -- and the extra-index URL is appended as two explicit
-    # args only when set.  uv has its OWN no-binary flag; it does NOT honor
-    # pip's PIP_NO_BINARY.  Fail loudly: a failed install must NOT fall through
-    # to "success".
-    if [ "${BACKEND}" = "uv" ]; then
-        set -- uv pip install --no-binary mpi4py -e "${PIP_TARGET_SPEC}"
-    else
-        export PIP_NO_BINARY="mpi4py"
-        set -- pip install -e "${PIP_TARGET_SPEC}"
-    fi
-    [ -n "${PIP_EXTRA_URL}" ] && set -- "$@" --extra-index-url "${PIP_EXTRA_URL}"
-    "$@" || {
-        echo "config_env.sh: package install failed." >&2
-        return 1
-    }
-
-    #-------------------------------------------------------
-    # host-specific post-install steps
-    if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
-
-        # Build the AWS OFI NCCL plugin and its non-Python build dependency
-        # (hwloc) under a single per-env "dependencies" prefix, independent of
-        # the packaging backend.  The build script provisions a standalone
-        # CUDA-aware hwloc there when the system lacks the dev headers, and makes
-        # its own hwloc prefix/rpath decision.  Fail loudly: a broken plugin must
-        # NOT report success.
-        export AWS_OFI_NCCL_VERSION="v1.19.2"
-        export AWS_OFI_PLUGIN_HOME="${ENV_DIR}/dependencies"
-        ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh || {
-            echo "config_env.sh: aws-ofi-nccl plugin build failed." >&2
-            return 1
-        }
-
-        # For the conda backend, also install activate.d/deactivate.d hooks so a
-        # bare `conda activate <prefix>` sets the NCCL/CXI runtime env on its own
-        # (the deactivate.d dir may not exist yet).  Both backends additionally
-        # get the hook sourced into the caller's shell by __ce_source_runtime_hooks.
-        if [ "${BACKEND}" = "conda" ]; then
-            mkdir -p ${CONDA_PREFIX}/etc/conda/activate.d ${CONDA_PREFIX}/etc/conda/deactivate.d \
-                && cp ${SCRIPTDIR}/activate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/activate.d/nccl-hpe-cxi.sh \
-                && cp ${SCRIPTDIR}/deactivate-nccl-hpe-cxi.sh ${CONDA_PREFIX}/etc/conda/deactivate.d/nccl-hpe-cxi.sh || {
-                echo "config_env.sh: failed to install NCCL activate/deactivate hooks." >&2
-                return 1
-            }
-        fi
-    fi
-
-    #-------------------------------------------------------
-    # post-install health check: queries the torch build (version/CUDA/NCCL),
-    # reports NCCL only when present, and confirms `import credit` works.
-    # NCCL is required only where we expect it (casper/derecho).  Build the
-    # arg list via `set --` (a function-local positional list) so expansion is
-    # identical under bash and zsh -- no unquoted word-splitting.
-    set -- "${SCRIPTDIR}/probe_installed_env.py"
-    [ "${__CE_EXPECT_NCCL}" -eq 1 ] && set -- "$@" "--require-nccl"
-    [ "${VERBOSE}" -eq 1 ]          && set -- "$@" "--verbose"
-    python "$@" || {
-        echo "config_env.sh: environment health check failed." >&2
-        return 1
-    }
-
-    #-------------------------------------------------------
-    # report success
-    echo
-    if [ "${BACKEND}" = "uv" ]; then
-        echo "\"${ENV_NAME}\" uv environment for ${TARGET_HOST} successfully installed into ${VIRTUAL_ENV}"
-        echo "use \"source ${ENV_DIR}/bin/activate\" to activate"
-    else
-        echo "\"${ENV_NAME}\" conda environment for ${TARGET_HOST} successfully installed into ${CONDA_PREFIX}"
-        echo "use \"conda activate ${ENV_DIR}\" to activate"
     fi
 }
 
@@ -382,14 +267,19 @@ __ce_source_runtime_hooks() {
 #----------------------------------------------------------------------------
 # Tidy up all shell state (important when SOURCED -- functions and vars defined
 # here would otherwise persist in the caller's interactive shell).
-# NOTE: when adding a new function/var above, add its name here too.
+# NOTE: when adding a new function/var above, add its name here too.  The
+# host-policy vars/functions are owned by host_config.sh and cleaned up by its
+# __ce_host_config_cleanup (invoked below), so they are NOT listed here.
 __ce_cleanup() {
-    unset VERBOSE REBUILD BACKEND TARGET_HOST ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
-          __CE_USE_MODULES __CE_CUDA_MODULE NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL CONDA_ROOT \
-          __ce_show_help __ce_bad_arg __ce_arg __ce_status 2>/dev/null
-    unset -f __ce_usage run_quiet __ce_parse_args __ce_host_config __ce_setup_modules \
+    unset CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
+          TARGET_HOST CONDA_ROOT \
+          __ce_show_help __ce_bad_arg __ce_arg __ce_expect_val __ce_status 2>/dev/null
+    unset -f __ce_usage run_quiet __ce_parse_args __ce_setup_modules \
              __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
-             __ce_activate_if_exists __ce_build_env __ce_source_runtime_hooks __ce_run 2>/dev/null
+             __ce_activate_if_exists __ce_source_runtime_hooks __ce_run 2>/dev/null
+    # Clean up the host_config.sh state we sourced in (defensive: it may be
+    # absent if sourcing failed).  Self-unsets __ce_host_config[_cleanup].
+    command -v __ce_host_config_cleanup >/dev/null 2>&1 && __ce_host_config_cleanup
     unset -f __ce_cleanup 2>/dev/null   # self-unset LAST
     return "${1:-0}"                    # propagate the status passed in
 }
@@ -419,15 +309,27 @@ __ce_run() {
     __ce_ensure_backend || return 1
     __ce_maybe_rebuild  || return 1
 
-    # Activate if it exists (and we did not just remove it for rebuild);
-    # otherwise build it from scratch.  Either way, source any runtime hooks
-    # into the caller's shell afterwards so every `source config_env.sh` sets
-    # the NCCL/CXI + plugin-discovery env.
-    if __ce_activate_if_exists; then
-        :
-    else
-        __ce_build_env || return 1
+    # Build it from scratch if absent (and we did not just keep it after a
+    # rebuild move-aside).  The build runs in create_env.sh as a SUBPROCESS:
+    # it inherits the module environment we loaded above and re-derives host
+    # policy itself, but its own activation is local and discarded -- so we
+    # ALWAYS activate the now-existing prefix here, in the caller's shell,
+    # regardless of build-vs-already-exists.  __ce_activate_if_exists then
+    # doubles as the post-build success gate.  Finally source any runtime hooks
+    # so every `source config_env.sh` sets the NCCL/CXI + plugin-discovery env.
+    if [ ! -d "${ENV_DIR}" ]; then
+        CREDIT_BACKEND="${CREDIT_BACKEND}" CREDIT_VERBOSE="${CREDIT_VERBOSE}" CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION}" \
+            CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION}" CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION}" \
+            "${SCRIPTDIR}/create_env.sh" || {
+                echo "config_env.sh: environment build failed." >&2
+                return 1
+            }
     fi
+
+    __ce_activate_if_exists || {
+        echo "config_env.sh: env expected after build but not activatable: ${ENV_DIR}" >&2
+        return 1
+    }
 
     __ce_source_runtime_hooks
     return 0
