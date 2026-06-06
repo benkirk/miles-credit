@@ -123,6 +123,27 @@ jobs:
           set -e
           echo "OK: --python-version parsing"
 
+      - name: "--torch-version / --cuda-version parsing (execute under ${{ matrix.shell }})"
+        run: |
+          set +e
+          # Valid values (both forms, both flags) still short-circuit on --help.
+          for a in "--torch-version 2.10.0 --help" "--torch-version=2.10.0 --help" \
+                   "--cuda-version 12.6 --help"     "--cuda-version=12.9 --help"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0)"; printf '%s\n' "$out"; exit 1; }
+          done
+          # Missing value: bare trailing flag, and a swallowed following flag.
+          for a in "--torch-version" "--torch-version --uv" "--cuda-version" "--cuda-version --uv"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            set -e
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0, mapped)"; printf '%s\n' "$out"; exit 1; }
+            printf '%s\n' "$out" | grep -q 'missing value' \
+              || { echo "FAIL: '$a' did not report missing value"; printf '%s\n' "$out"; exit 1; }
+            set +e
+          done
+          set -e
+          echo "OK: --torch-version / --cuda-version parsing"
+
       - name: "Source + dual-mode + no shell pollution (${{ matrix.shell }})"
         run: |
           # --help returns before any build/conda work, so this isolates the
@@ -137,9 +158,11 @@ jobs:
           done
           # No helper VARIABLES may survive (${VAR+set} is a set-test, bash & zsh).
           # Includes the host-policy scalars owned by host_config.sh.
-          for v in CONDA_ROOT VERBOSE REBUILD BACKEND PYTHON_VERSION TARGET_HOST __ce_status __ce_expect_val \
-                   ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
-                   __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL; do
+          for v in CONDA_ROOT VERBOSE REBUILD BACKEND PYTHON_VERSION TORCH_VERSION CUDA_VERSION \
+                   TARGET_HOST __ce_status __ce_expect_val \
+                   ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
+                   __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
+                   __CE_WANT_CUDA __CE_DEFAULT_CUDA; do
             eval "probe=\${$v+set}"
             if [ "${probe:-}" = set ]; then echo "FAIL: leaked variable: $v"; exit 1; fi
           done

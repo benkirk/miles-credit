@@ -16,9 +16,12 @@
 # "success".
 #
 # Inputs (from the environment the parent exports / inherits):
-#   BACKEND    - "conda" (default) or "uv"
-#   VERBOSE    - 0/1 (forwarded to the probe)
-#   NCAR_HOST  - host id (-> TARGET_HOST); already in the HPC environment
+#   BACKEND        - "conda" (default) or "uv"
+#   VERBOSE        - 0/1 (forwarded to the probe; also echoes the pip command)
+#   PYTHON_VERSION - Python to build with (default 3.11)
+#   TORCH_VERSION  - optional torch version pin (empty -> host_config default)
+#   CUDA_VERSION   - optional CUDA build of torch (empty -> host_config default)
+#   NCAR_HOST      - host id (-> TARGET_HOST); already in the HPC environment
 #   plus the module environment the parent loaded (PATH/CC/CUDA_HOME/...),
 #   which IS inherited by this subprocess.
 #
@@ -34,6 +37,8 @@ source "${SCRIPTDIR}/host_config.sh"
 BACKEND="${BACKEND:-conda}"
 VERBOSE="${VERBOSE:-0}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
+TORCH_VERSION="${TORCH_VERSION:-}"
+CUDA_VERSION="${CUDA_VERSION:-}"
 TARGET_HOST="${NCAR_HOST:-default}"
 __ce_host_config
 
@@ -99,7 +104,15 @@ else
     export PIP_NO_BINARY="mpi4py"
     set -- pip install -e "${PIP_TARGET_SPEC}"
 fi
-[ -n "${PIP_EXTRA_URL}" ] && set -- "$@" --extra-index-url "${PIP_EXTRA_URL}"
+# Pin torch (version + CUDA build) on the command line on CUDA hosts, with the
+# matching PyTorch index appended right after.  Both come from host_config.sh
+# (driven by --torch-version/--cuda-version) -- empty on non-CUDA installs.
+[ -n "${__CE_TORCH_SPEC}" ] && set -- "$@" "${__CE_TORCH_SPEC}"
+[ -n "${PIP_EXTRA_URL}" ]   && set -- "$@" --extra-index-url "${PIP_EXTRA_URL}"
+# The command is assembled dynamically (backend, extra, torch pin, index); echo
+# the fully expanded form under --verbose so it is reproducible.  %q quotes each
+# arg safely and is supported by both bash and zsh.
+[ "${VERBOSE}" -eq 1 ] && { printf '+'; printf ' %q' "$@"; printf '\n'; }
 "$@" || {
     echo "create_env.sh: package install failed." >&2
     exit 1

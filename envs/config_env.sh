@@ -49,7 +49,9 @@ source "${SCRIPTDIR}/host_config.sh"
 #----------------------------------------------------------------------------
 __ce_usage() {
     cat <<USAGE
-Usage: [source] config_env.sh [--uv] [--python-version X.Y] [--verbose] [--rebuild] [--help]
+Usage: [source] config_env.sh [--uv] [--python-version X.Y]
+                              [--torch-version X.Y.Z] [--cuda-version X.Y]
+                              [--verbose] [--rebuild] [--help]
 
   --uv            Use the 'uv' package installer and a uv-managed venv instead
                   of conda.  Supported on all hosts (default/casper/derecho).
@@ -60,6 +62,17 @@ Usage: [source] config_env.sh [--uv] [--python-version X.Y] [--verbose] [--rebui
                   Encoded into the env prefix (e.g. credit-env-py3.12) so
                   multiple versions coexist.  Accepts '--python-version 3.12'
                   or '--python-version=3.12'.
+  --torch-version X.Y.Z
+                  torch version to pin on the pip line for the CUDA-enabled
+                  hosts (default 2.10.0).  Combined with --cuda-version into a
+                  'torch==<ver>+cu<tag>' spec plus the matching PyTorch
+                  --extra-index-url.  Accepts the '=' form too.
+  --cuda-version X.Y
+                  CUDA build of torch to install on the CUDA-enabled hosts,
+                  e.g. '12.6' -> the cu126 PyTorch wheels.  Defaults per host
+                  (casper 12.6, derecho 12.9); override for any host.  On the
+                  portable 'default' host, supplying this opts into a CUDA
+                  build (otherwise plain torch from PyPI is used).
   --verbose, -v   Show module/backend setup output (quiet by default).
   --rebuild, -r   Rebuild the environment even if it already exists.
                   The existing env is moved aside and removed in the
@@ -91,6 +104,8 @@ __ce_parse_args() {
     REBUILD=0
     BACKEND="conda"
     PYTHON_VERSION="3.11"
+    TORCH_VERSION=""          # empty = use host_config.sh default (2.10.0)
+    CUDA_VERSION=""           # empty = use host_config.sh per-host default
     __ce_show_help=0
     __ce_bad_arg=""
     __ce_expect_val=""        # name of the option whose value the NEXT token is
@@ -102,6 +117,8 @@ __ce_parse_args() {
                 -*) __ce_bad_arg="--${__ce_expect_val} (missing value)" ;;
                 *)  case "${__ce_expect_val}" in
                         python-version) PYTHON_VERSION="${__ce_arg}" ;;
+                        torch-version)  TORCH_VERSION="${__ce_arg}" ;;
+                        cuda-version)   CUDA_VERSION="${__ce_arg}" ;;
                     esac ;;
             esac
             __ce_expect_val=""
@@ -111,6 +128,10 @@ __ce_parse_args() {
             --uv)                 BACKEND="uv" ;;
             --python-version)     __ce_expect_val="python-version" ;;
             --python-version=*)   PYTHON_VERSION="${__ce_arg#*=}" ;;
+            --torch-version)      __ce_expect_val="torch-version" ;;
+            --torch-version=*)    TORCH_VERSION="${__ce_arg#*=}" ;;
+            --cuda-version)       __ce_expect_val="cuda-version" ;;
+            --cuda-version=*)     CUDA_VERSION="${__ce_arg#*=}" ;;
             --verbose|-v)         VERBOSE=1 ;;
             --rebuild|-r)         REBUILD=1 ;;
             --help|-h)            __ce_show_help=1 ;;
@@ -118,7 +139,10 @@ __ce_parse_args() {
             *)                    __ce_bad_arg="${__ce_arg}" ;;
         esac
     done
-    # A trailing "--python-version" with no following token, or an empty value.
+    # A trailing value-option with no following token (e.g. "--python-version"
+    # last) is reported here.  NOTE: empty TORCH_VERSION/CUDA_VERSION are VALID
+    # (they mean "use the host default"), so only --python-version gets the
+    # extra non-empty check below.
     [ -n "${__ce_expect_val}" ] && __ce_bad_arg="--${__ce_expect_val} (missing value)"
     [ -n "${PYTHON_VERSION}" ]  || __ce_bad_arg="--python-version (missing value)"
 }
@@ -243,7 +267,8 @@ __ce_source_runtime_hooks() {
 # host-policy vars/functions are owned by host_config.sh and cleaned up by its
 # __ce_host_config_cleanup (invoked below), so they are NOT listed here.
 __ce_cleanup() {
-    unset VERBOSE REBUILD BACKEND PYTHON_VERSION TARGET_HOST CONDA_ROOT \
+    unset VERBOSE REBUILD BACKEND PYTHON_VERSION TORCH_VERSION CUDA_VERSION \
+          TARGET_HOST CONDA_ROOT \
           __ce_show_help __ce_bad_arg __ce_arg __ce_expect_val __ce_status 2>/dev/null
     unset -f __ce_usage run_quiet __ce_parse_args __ce_setup_modules \
              __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
@@ -290,6 +315,7 @@ __ce_run() {
     # so every `source config_env.sh` sets the NCCL/CXI + plugin-discovery env.
     if [ ! -d "${ENV_DIR}" ]; then
         BACKEND="${BACKEND}" VERBOSE="${VERBOSE}" PYTHON_VERSION="${PYTHON_VERSION}" \
+            TORCH_VERSION="${TORCH_VERSION}" CUDA_VERSION="${CUDA_VERSION}" \
             "${SCRIPTDIR}/create_env.sh" || {
                 echo "config_env.sh: environment build failed." >&2
                 return 1

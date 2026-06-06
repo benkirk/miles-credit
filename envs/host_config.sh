@@ -11,7 +11,8 @@
 # TARGET_HOST + BACKEND, with no fragile cross-process export list.
 #
 # The sourcer MUST set SCRIPTDIR (the envs/ dir), BACKEND, and PYTHON_VERSION
-# before calling __ce_host_config; it reads TARGET_HOST too.
+# before calling __ce_host_config; it reads TARGET_HOST too.  TORCH_VERSION and
+# CUDA_VERSION are optional inputs (empty => host/global defaults apply).
 #
 # Like config_env.sh this must be portable to BOTH bash and zsh (no associative
 # arrays; no reliance on word-splitting).
@@ -25,8 +26,15 @@
 #   ENV_DIR          - derived here, once
 #   PIP_EXTRA_URL    - bare extra-index URL, or "" (kept as a URL, not a
 #                      "--extra-index-url <url>" string, so we never depend
-#                      on word-splitting -- which differs between bash & zsh)
-#   PIP_TARGET_SPEC  - "."  or  ".[ncar-hpc-<host>]"
+#                      on word-splitting -- which differs between bash & zsh).
+#                      Derived from the resolved CUDA version on CUDA hosts.
+#   PIP_TARGET_SPEC  - "."  or  ".[distributed]"  (the single MPI extra; the
+#                      torch/CUDA pin is NOT in pyproject -- see __CE_TORCH_SPEC)
+#   __CE_TORCH_SPEC  - "" or "torch==<ver>+cu<tag>": explicit torch pin appended
+#                      to the pip line on CUDA hosts.  Replaces the former
+#                      per-host ncar-hpc-{casper,derecho} torch pins so the
+#                      version/CUDA build are chosen at install time, not baked
+#                      into pyproject.toml.
 #   __CE_CUDA_MODULE - ""  or  "cuda"  (<= 1 token, so unquoted expansion is
 #                      identical in bash and zsh)
 #   __CE_USE_MODULES - 0/1 (run the module dance?)
@@ -34,6 +42,12 @@
 #   __CE_EXPECT_NCCL - 0/1 (is NCCL expected here? -> health check requires it.
 #                      NCCL is optional in general but expected on the GPU/HPC
 #                      hosts we cannot exercise on free CI: casper, derecho)
+#
+# CUDA/torch selection (resolution order: CLI flag > per-host default > global):
+#   __CE_WANT_CUDA   - 0/1 (does this host install a CUDA torch build?)
+#   __CE_DEFAULT_CUDA- per-host default CUDA version, or "" to use the global one
+#   global defaults  - torch 2.10.0, CUDA 12.6 (the constants below)
+# The 'default' host installs a CUDA build only if the user passes --cuda-version.
 #
 # ADDING A HOST = add ONE case arm here.  Both config_env.sh's module-setup
 # phase and create_env.sh's pip/build phase read from this function, so nothing
@@ -44,39 +58,58 @@ __ce_host_config() {
     ENV_NAME="credit-env"
     PIP_EXTRA_URL=""
     PIP_TARGET_SPEC="."
+    __CE_TORCH_SPEC=""
     __CE_CUDA_MODULE=""
     __CE_USE_MODULES=0
     NEEDS_OFI_PLUGIN=0
     __CE_EXPECT_NCCL=0
+    __CE_WANT_CUDA=0
+    __CE_DEFAULT_CUDA=""
 
     case "${TARGET_HOST}" in
 
         "default")
-            # vanilla conda, nothing special; all defaults above apply
+            # vanilla conda, nothing special; all defaults above apply.
+            # (A CUDA torch build is opt-in here via --cuda-version.)
             ;;
 
         "casper")
             ENV_NAME="${ENV_NAME}-${NCAR_HOST}"
             __CE_USE_MODULES=1
-            PIP_EXTRA_URL="https://download.pytorch.org/whl/cu126"
-            PIP_TARGET_SPEC=".[ncar-hpc-${NCAR_HOST}]"
+            PIP_TARGET_SPEC=".[distributed]"
             __CE_EXPECT_NCCL=1
+            __CE_WANT_CUDA=1          # default CUDA -> global default (12.6)
             ;;
 
         "derecho")
             ENV_NAME="${ENV_NAME}-${NCAR_HOST}"
             __CE_USE_MODULES=1
             __CE_CUDA_MODULE="cuda"
-            PIP_EXTRA_URL="https://download.pytorch.org/whl/cu129"
-            PIP_TARGET_SPEC=".[ncar-hpc-${NCAR_HOST}]"
+            PIP_TARGET_SPEC=".[distributed]"
             NEEDS_OFI_PLUGIN=1
             __CE_EXPECT_NCCL=1
+            __CE_WANT_CUDA=1
+            __CE_DEFAULT_CUDA="12.9"  # derecho ships a newer CUDA than the global default
             ;;
 
         *)
             echo "ERROR: unhandled ${TARGET_HOST}?!!" >&2
             ;;
     esac
+
+    # Build the torch pin + matching PyTorch extra-index-url when this host wants
+    # a CUDA build (or the user explicitly asked for one with --cuda-version).
+    # Resolve the CUDA version CLI > per-host default > global default; the torch
+    # version is a single global default overridable by --torch-version.  Strip
+    # the dot for the wheel tag (12.6 -> cu126; ${//} works in bash AND zsh).
+    if [ "${__CE_WANT_CUDA}" -eq 1 ] || [ -n "${CUDA_VERSION}" ]; then
+        __CE_TORCH_VER="${TORCH_VERSION:-2.10.0}"
+        __CE_CUDA_VER="${CUDA_VERSION:-${__CE_DEFAULT_CUDA:-12.6}}"
+        __CE_CUDA_TAG="cu${__CE_CUDA_VER//./}"
+        PIP_EXTRA_URL="https://download.pytorch.org/whl/${__CE_CUDA_TAG}"
+        __CE_TORCH_SPEC="torch==${__CE_TORCH_VER}+${__CE_CUDA_TAG}"
+        unset __CE_TORCH_VER __CE_CUDA_VER __CE_CUDA_TAG
+    fi
 
     # Encode the Python version into the prefix (always, even the default) so
     # envs built with different Python versions coexist and never cross-detect.
@@ -96,8 +129,9 @@ __ce_host_config() {
 # sourced into a long-lived shell (i.e. config_env.sh sourced); harmless in the
 # create_env.sh subprocess, which never calls it.
 __ce_host_config_cleanup() {
-    unset ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC \
-          __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL 2>/dev/null
+    unset ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
+          __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
+          __CE_WANT_CUDA __CE_DEFAULT_CUDA 2>/dev/null
     unset -f __ce_host_config 2>/dev/null
     unset -f __ce_host_config_cleanup 2>/dev/null   # self-unset LAST
 }
