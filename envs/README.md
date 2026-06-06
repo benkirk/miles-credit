@@ -11,8 +11,12 @@ Sourcing this script in your interactive shell or in a PBS run script is a
 reliable, one-line way to initialize CREDIT on any supported platform.
 
 `config_env.sh` is the only file you invoke; the build itself lives in a sibling
-`create_env.sh` (run automatically when the environment is missing) and per-host
-policy in `host_config.sh`. You never call those directly.
+`create_env.sh` (run automatically when the environment is missing), per-host
+policy in `host_config.sh`, and the **default versions** (Python, torch, CUDA,
+the AWS OFI NCCL plugin, and the default backend) in `default_versions.sh`. You
+never call those directly. To change a default version, edit the single
+corresponding line in `default_versions.sh`; the defaults shown by `--help` and
+in the table below are read from there.
 
 The target machine is selected by the `NCAR_HOST` environment variable (NCAR
 HPC sets this automatically on login). When `NCAR_HOST` is unset or empty the
