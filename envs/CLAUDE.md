@@ -10,9 +10,8 @@ behavior changes.
 | File | Role |
 | --- | --- |
 | `config_env.sh` | Dual-mode (source **or** execute) entry point. `bash`+`zsh`, conda (default) or `uv` (`--uv`), idempotent. Does modules, env vars, **activation**, and orchestration in the caller's shell. Shells out to `create_env.sh` to build. |
-| `host_config.sh` | Per-host policy (`__ce_host_config`) — the **single source of truth**. SOURCED (never executed) by both `config_env.sh` and `create_env.sh`, so both derive identical `ENV_DIR`/pip-target/flags. Sources `default_versions.sh`. Owns its own cleanup (`__ce_host_config_cleanup`, which chains to `__ce_default_versions_cleanup`). |
-| `default_versions.sh` | **Single source of truth for the DEFAULT versions** (`CREDIT_DEFAULT_{BACKEND,PYTHON_VERSION,TORCH_VERSION,CUDA_VERSION,AWS_OFI_NCCL_VERSION}`). SOURCED (never executed): by `host_config.sh` (→ reaches `config_env.sh` + `create_env.sh`) and directly by `build-aws-ofi-nccl-plugin.sh`. Owns its own cleanup (`__ce_default_versions_cleanup`). Bump a default = one-line edit here. |
-| `create_env.sh` | The build recipe (conda create / `uv venv`, pip install, OFI plugin, probe). **EXECUTE-ONLY**: `config_env.sh` runs it as a SUBPROCESS when the env is absent, so it pollutes nothing. Mirrors `build-aws-ofi-nccl-plugin.sh`. |
+| `versions_config.sh` | **Single source of truth for BOTH the DEFAULT versions** (`CREDIT_DEFAULT_{BACKEND,PYTHON_VERSION,TORCH_VERSION,CUDA_VERSION,AWS_OFI_NCCL_VERSION}`) **and the per-host policy** (`__ce_host_config`, `__ce_sha`). SOURCED (never executed) by `config_env.sh` + `create_env.sh` (both derive identical `ENV_DIR`/pip-target/flags) and by `build-aws-ofi-nccl-plugin.sh` (just for the AWS plugin default). Sourcing only assigns constants + defines functions (nothing runs → safe under `set -eu`). Owns one cleanup, `__ce_host_config_cleanup` (unsets the host-policy scalars AND the `CREDIT_DEFAULT_*` constants). Bump a default = one-line edit here. |
+| `create_env.sh` | The build recipe (conda create / `uv venv`, pip install, OFI plugin, probe, then writes `<ENV_DIR>/credit-env.manifest`). **EXECUTE-ONLY**: `config_env.sh` runs it as a SUBPROCESS when the env is absent, so it pollutes nothing. Mirrors `build-aws-ofi-nccl-plugin.sh`. |
 | `build-aws-ofi-nccl-plugin.sh` | derecho-only. Builds the AWS OFI NCCL plugin + (if no system hwloc) a standalone hwloc into `<env>/dependencies/`. Owns **all** hwloc logic. Invoked by `create_env.sh`. |
 | `activate-nccl-hpe-cxi.sh` / `deactivate-nccl-hpe-cxi.sh` | Runtime NCCL/Cray-Slingshot (CXI) env vars + plugin discovery (`NCCL_NET_PLUGIN`, `LD_LIBRARY_PATH`). |
 | `probe_installed_env.py` | Post-install health check (torch/CUDA/NCCL, `import credit`); `--require-nccl`, `--verbose`. |
@@ -22,7 +21,7 @@ behavior changes.
 ## How the three files fit together
 
 `config_env.sh` is the only dual-mode file (it must `return`/`exit` correctly
-when sourced). It sources `host_config.sh` for policy, and when the env is
+when sourced). It sources `versions_config.sh` for policy, and when the env is
 absent it **executes** `create_env.sh` as a child process to build, then
 re-activates the finished prefix in the caller's shell itself.
 
@@ -31,7 +30,7 @@ Inter-file contract (the part to hold in your head):
   **module environment** the parent loaded (modules are env vars), but **not**
   shell functions. So it re-sources `conda.sh` itself (the `conda activate`
   *function* isn't inherited) and re-derives host policy by sourcing
-  `host_config.sh` + calling `__ce_host_config` (agreement with the parent by
+  `versions_config.sh` + calling `__ce_host_config` (agreement with the parent by
   construction, not via a fragile export list). The parent passes only `BACKEND`,
   `VERBOSE`, `PYTHON_VERSION`, `TORCH_VERSION`, and `CUDA_VERSION`; `NCAR_HOST` is
   already in the environment.
@@ -56,17 +55,15 @@ script is sourced into interactive shells and PBS run scripts):
 3. **Zero shell-state pollution when sourced.** `__ce_cleanup` must `unset` every
    variable and `unset -f` every function the sourced path defines. **If you add a
    helper function or a variable, add its name to the matching list in the same
-   edit.** Cleanup is now split by ownership: `config_env.sh`'s own
-   vars/functions go in its `__ce_cleanup`; the host-policy vars/functions go in
-   `host_config.sh`'s `__ce_host_config_cleanup` (which `__ce_cleanup` invokes);
-   the `CREDIT_DEFAULT_*` constants go in `default_versions.sh`'s
-   `__ce_default_versions_cleanup` (which `__ce_host_config_cleanup` chains to).
-   Add a name to the list **in the file that defines it**. (`create_env.sh` and
-   `build-aws-ofi-nccl-plugin.sh` are subprocesses and need no cleanup.) This is
-   the #1 regression here, and CI's
-   "no shell pollution" step will catch it — but check it yourself.
+   edit.** Cleanup is split by ownership: `config_env.sh`'s own vars/functions go
+   in its `__ce_cleanup`; the host-policy vars/functions AND the `CREDIT_DEFAULT_*`
+   constants go in `versions_config.sh`'s `__ce_host_config_cleanup` (which
+   `__ce_cleanup` invokes). Add a name to the list **in the file that defines it**.
+   (`create_env.sh` and `build-aws-ofi-nccl-plugin.sh` are subprocesses and need
+   no cleanup.) This is the #1 regression here, and CI's "no shell pollution" step
+   will catch it — but check it yourself.
 4. **Host policy is one source of truth.** All per-host differences live in
-   `__ce_host_config` **in `host_config.sh`** (one `case` arm per host). Adding a
+   `__ce_host_config` **in `versions_config.sh`** (one `case` arm per host). Adding a
    host = add one arm; nothing else should grow host-awareness except
    `__ce_setup_modules` (in `config_env.sh`) if its module set genuinely differs.
 5. **Idempotent.** First run builds; later runs just `Activating …`. `--rebuild`
@@ -77,15 +74,39 @@ script is sourced into interactive shells and PBS run scripts):
 
 ## Backend specifics
 
-- **Prefix encodes backend AND Python version** so independent builds coexist and
-  existence tests never cross-detect: `credit-env[-host]-py<X.Y>[-uv]` (e.g.
-  `credit-env-py3.11`, `credit-env-derecho-py3.12-uv`). The version is **always**
-  present, even the default 3.11. `__ce_host_config` builds this from
-  `CREDIT_BACKEND` + `CREDIT_PYTHON_VERSION` (a `config_env.sh`-owned input,
-  default `CREDIT_DEFAULT_PYTHON_VERSION` from `default_versions.sh`, threaded to
-  the `create_env.sh` subprocess and used for `conda
-  create python=…` / `uv venv --python …`). Add the `-py…` segment in exactly one
-  place (`__ce_host_config`).
+- **Prefix is content-addressed** so independent builds coexist and existence
+  tests never cross-detect: `<backend>-credit-env[-host]-<sha>` (e.g.
+  `conda-credit-env-6dbcaf4e`, `uv-credit-env-derecho-22ab90ff`). `__ce_host_config`
+  assembles `__CE_MANIFEST` — a canonical, fixed-field-order string of **every**
+  build-affecting input (schema/backend/host/python/torch/cuda/torch_spec/
+  pip_extra_url/pip_target/aws_ofi_nccl/ofi_plugin) — *after* all resolution, then
+  `__CE_SHA="$(printf '%s' "$__CE_MANIFEST" | __ce_sha | cut -c1-8)"`. Hashing the
+  **resolved** config (not raw CLI) is what makes lookup idempotent (flag
+  spelling/order is irrelevant) and unique across every axis. The manifest records
+  build **intent**, not resolved package versions (unpinned torch keeps a stable
+  SHA — it is not a lockfile). `schema=1` is a recipe version: bump it to
+  deliberately invalidate ALL envs when the recipe changes in a way no field
+  captures. `aws_ofi_nccl` is in the manifest **only when `ofi_plugin=1`**
+  (derecho), so bumping its default never needlessly invalidates default/casper.
+  `__ce_sha` is portable (sha256sum → shasum → openssl → python3 last-resort) so it
+  works before any module puts Python on PATH. Build the name in exactly one place
+  (`__ce_host_config`); python/torch/cuda are NOT in the name (they live in the
+  manifest + SHA).
+- **The manifest is written into the env and re-checked on activate.** After a
+  successful build `create_env.sh` writes the byte-for-byte hashed string to
+  `<ENV_DIR>/credit-env.manifest` (so re-hashing the file reproduces the dir's
+  SHA). On the activate path `config_env.sh`'s `__ce_check_manifest` requires that
+  file to exist and `cmp`-match `__CE_MANIFEST`; a missing manifest (interrupted
+  build) or mismatch (collision/stale) is **fatal** with a `--rebuild` hint —
+  never silently activate the wrong/half-built env. Parent and child agree by
+  construction (both recompute `__CE_MANIFEST` via `__ce_host_config`), so the
+  manifest is **not** added to the subprocess export list.
+- **Resolve-only / inventory modes.** `--print-env-dir` runs `__ce_host_config`
+  then echoes `ENV_DIR` and stops (no build/activate) — CI and PBS can no longer
+  predict the SHA, so they ask the script. `--list` (`__ce_list`) scans
+  `*-credit-env-*/`, reads each `credit-env.manifest`, and prints a table — the
+  "status regardless of CLI args" capability. Both terminate via the rc-2 path
+  (like `--help`).
 - **Input vars are `CREDIT_*`-namespaced — do not rename them back to bare names.**
   The cross-process inputs (`CREDIT_BACKEND`, `CREDIT_VERBOSE`,
   `CREDIT_PYTHON_VERSION`, `CREDIT_TORCH_VERSION`, `CREDIT_CUDA_VERSION`) carry a
@@ -96,7 +117,7 @@ script is sourced into interactive shells and PBS run scripts):
   `torch==…+cu1290` pin — derecho-only, so CI (default host, no `cuda` module)
   never saw it. When you add a new input, give it a `CREDIT_` prefix and thread it
   through all three files (parse in `config_env.sh`, pass at the subprocess call,
-  read in `create_env.sh`/`host_config.sh`).
+  read in `create_env.sh`/`versions_config.sh`).
 - **uv must provision its own interpreter:** the `uv venv` call uses
   `--managed-python` so it never adopts whatever `python<X.Y>` the caller's shell
   exposes (an active conda env, a system python). Without it the venv symlinks an
@@ -110,13 +131,15 @@ script is sourced into interactive shells and PBS run scripts):
   `--torch-version`/`--cuda-version`. CUDA version resolves CLI > per-host default
   (`__CE_DEFAULT_CUDA`, e.g. derecho 12.9) > global default
   (`CREDIT_DEFAULT_CUDA_VERSION`); torch defaults to `CREDIT_DEFAULT_TORCH_VERSION`
-  — both global defaults live in `default_versions.sh`. The `default` host gets a
+  — both global defaults live in `versions_config.sh`. The `default` host gets a
   CUDA build only if the
   user passes `--cuda-version`. This is what let the old per-host
   `ncar-hpc-{casper,derecho}` extras collapse into one. `--verbose` echoes the
-  fully expanded pip command (the line is assembled dynamically). Neither version
-  is encoded in the prefix — two CUDA variants share a prefix; use `--rebuild` to
-  switch an existing env.
+  fully expanded pip command (the line is assembled dynamically). Both versions
+  ARE in the config hash now (via `__CE_MANIFEST`), so two CUDA/torch variants get
+  **distinct** SHA prefixes and coexist — `--rebuild` is no longer required to
+  switch between them (it remains for forcing a clean rebuild of the *same*
+  config).
   - **`--torch-version` also pins a plain CPU build.** When no CUDA build is
     requested (no `--cuda-version`, non-CUDA host) but `--torch-version` is given,
     `__ce_host_config` sets `__CE_TORCH_SPEC=torch==<ver>` with an empty
@@ -144,11 +167,19 @@ script is sourced into interactive shells and PBS run scripts):
 
 ## How to verify a change
 
-- Syntax: `bash -n` + `zsh -n` on `config_env.sh`, `host_config.sh`, and
-  `default_versions.sh`; `bash -n envs/create_env.sh` (execute-only → bash only).
+- Syntax: `bash -n` + `zsh -n` on `config_env.sh` and `versions_config.sh`;
+  `bash -n envs/create_env.sh` (execute-only → bash only).
 - Fast contract (no build): `--help`, `--uv --help`, `--bogus` (maps to rc 0),
   and sourced `--help` leaving no `__ce_*`/`CREDIT_*`/host-policy/`CREDIT_DEFAULT_*`
-  residue (incl. `__ce_default_versions_cleanup`) under bash & zsh.
+  residue (incl. `__ce_host_config_cleanup`, `__ce_sha`, `__ce_list`,
+  `__ce_check_manifest`, `__CE_MANIFEST`, `__CE_SHA`) under bash & zsh.
+- Content-addressing (no build): `--print-env-dir` is deterministic and matches
+  across bash/zsh and across the three `__ce_sha` backends; same config via
+  `--python-version=3.12` vs `--python-version 3.12` → identical SHA; `--uv` /
+  `--torch-version` / `--cuda-version` each shift the SHA. `--list` reads
+  manifests and tolerates an empty `envs/` (zsh `nomatch` is disabled locally).
+  The integrity invariant: `printf '%s' "$__CE_MANIFEST" | __ce_sha | cut -c1-8`
+  equals the suffix of `ENV_DIR` (= what `create_env.sh` writes to the manifest).
 - **HPC behavior is not covered by CI** — the heavy `casper`/`derecho` builds
   (CUDA wheels, NCCL, Cray libfabric, the OFI plugin) can't run on free runners.
   Validate those **manually on a casper/derecho login node**, both backends, full
@@ -165,6 +196,10 @@ script is sourced into interactive shells and PBS run scripts):
   `--rebuild` / verify-torch / pipdeptree / pytest, gated by `rebuild` /
   `introspect` / `run-tests` inputs). `cuda-version` uses the sentinel `disabled`
   (= don't pass `--cuda-version`); a real value is reserved for a future GPU leg.
+  The action's "Derive backend / arg vars" step captures
+  `CE_ENV=$(basename "$(bash envs/config_env.sh $ARGS --print-env-dir)")` — it can
+  no longer hardcode the prefix now that the name is a content hash; all later
+  `envs/$CE_ENV` references are unchanged.
 - `ci-config-env.yml` triggers on PRs to `staging`/`main` touching `envs/**`,
   `pyproject.toml`, or the workflow; plus `workflow_dispatch`. Matrix:
   {ubuntu-x86_64, ubuntu-arm64, macos-arm64} × {bash, zsh}; `full-build` adds

@@ -55,10 +55,13 @@ runs:
     # Single source of truth for the per-leg differences, written to $GITHUB_ENV
     # so the later steps (and any caller step) read them as plain $CE_* vars:
     #   CE_ARGS   - the config_env.sh flags assembled from the version inputs
-    #   CE_ENV    - the env-dir basename (credit-env-py<X.Y>[-uv]) we assert on
+    #   CE_ENV    - the env-dir basename we assert on
     #   CE_MARKER - the activation marker the source-activate check inspects
-    # The python version is ALWAYS passed (and encoded into CE_ENV) -- even the
-    # default 3.11 -- matching __ce_host_config's prefix rule exactly.
+    # The python version is ALWAYS passed -- even the default 3.11.  The prefix is
+    # now a content hash (<backend>-credit-env[-host]-<sha>), so CI can no longer
+    # predict it: we ask the script via --print-env-dir (resolve-only; needs no
+    # conda/uv, and the SHA is shell-independent so bash is fine) and take the
+    # basename.
     - name: Derive backend / arg vars
       shell: bash
       run: |
@@ -71,8 +74,9 @@ runs:
         if [ "${{ inputs.cuda-version }}" != disabled ] && [ -n "${{ inputs.cuda-version }}" ]; then
           ARGS="$ARGS --cuda-version ${{ inputs.cuda-version }}"
         fi
-        ENV="credit-env-py${{ inputs.python-version }}"
-        [ "${{ inputs.backend }}" = uv ] && ENV="${ENV}-uv"
+        ENV_DIR=$(bash envs/config_env.sh $ARGS --print-env-dir) \
+          || { echo "FAIL: --print-env-dir returned non-zero"; exit 1; }
+        ENV=$(basename "$ENV_DIR")
         MARKER=CONDA_PREFIX
         [ "${{ inputs.backend }}" = uv ] && MARKER=VIRTUAL_ENV
         { echo "CE_ARGS=$ARGS"; echo "CE_ENV=$ENV"; echo "CE_MARKER=$MARKER"; } >> "$GITHUB_ENV"
@@ -151,7 +155,7 @@ runs:
           */envs/$CE_ENV) echo "OK: $CE_MARKER=$marker_val" ;;
           *) echo "FAIL: $CE_MARKER not the env: '$marker_val'"; exit 1 ;;
         esac
-        for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_default_versions_cleanup run_quiet; do
+        for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_list __ce_check_manifest run_quiet; do
           if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
         done
         echo "OK: source-activate leaves no residue"

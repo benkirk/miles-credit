@@ -62,14 +62,11 @@ jobs:
 
       - name: Syntax check (bash -n and zsh -n)
         run: |
-          # config_env.sh + host_config.sh + default_versions.sh are sourced
-          # under bash AND zsh.
+          # config_env.sh + versions_config.sh are sourced under bash AND zsh.
           bash -n envs/config_env.sh
           zsh  -n envs/config_env.sh
-          bash -n envs/host_config.sh
-          zsh  -n envs/host_config.sh
-          bash -n envs/default_versions.sh
-          zsh  -n envs/default_versions.sh
+          bash -n envs/versions_config.sh
+          zsh  -n envs/versions_config.sh
           # create_env.sh is execute-only (a bash subprocess), like
           # build-aws-ofi-nccl-plugin.sh -> bash-only.
           bash -n envs/create_env.sh
@@ -156,15 +153,14 @@ jobs:
           source envs/config_env.sh --help; rc=$?
           [ "$rc" -eq 0 ] || { echo "FAIL: source --help rc=$rc (want 0)"; exit 1; }
           # No helper FUNCTIONS may survive in the caller shell (config_env.sh,
-          # the host_config.sh it sources -> __ce_host_config[_cleanup], and the
-          # default_versions.sh that sources -> __ce_default_versions_cleanup).
-          for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_default_versions_cleanup __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda run_quiet; do
+          # plus the versions_config.sh it sources -> __ce_host_config[_cleanup]
+          # and __ce_sha).
+          for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda run_quiet; do
             if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
           done
           # No helper VARIABLES may survive (${VAR+set} is a set-test, bash & zsh).
-          # Includes the CREDIT_*-namespaced inputs, the host-policy scalars owned
-          # by host_config.sh, and the CREDIT_DEFAULT_* constants from
-          # default_versions.sh.
+          # Includes the CREDIT_*-namespaced inputs, the host-policy scalars, and
+          # the CREDIT_DEFAULT_* constants -- all owned by versions_config.sh.
           for v in CONDA_ROOT CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
                    TARGET_HOST __ce_status __ce_expect_val \
                    ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \

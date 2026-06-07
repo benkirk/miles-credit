@@ -11,21 +11,26 @@ Sourcing this script in your interactive shell or in a PBS run script is a
 reliable, one-line way to initialize CREDIT on any supported platform.
 
 `config_env.sh` is the only file you invoke; the build itself lives in a sibling
-`create_env.sh` (run automatically when the environment is missing), per-host
-policy in `host_config.sh`, and the **default versions** (Python, torch, CUDA,
-the AWS OFI NCCL plugin, and the default backend) in `default_versions.sh`. You
+`create_env.sh` (run automatically when the environment is missing), and the
+per-host policy plus the **default versions** (Python, torch, CUDA, the AWS OFI
+NCCL plugin, and the default backend) live together in `versions_config.sh`. You
 never call those directly. To change a default version, edit the single
-corresponding line in `default_versions.sh`; the defaults shown by `--help` and
+corresponding line in `versions_config.sh`; the defaults shown by `--help` and
 in the table below are read from there.
 
 The target machine is selected by the `NCAR_HOST` environment variable (NCAR
 HPC sets this automatically on login). When `NCAR_HOST` is unset or empty the
-script uses the portable `default` configuration. Each host installs into its
-own prefix alongside this script, with the Python version always encoded in the
-name: `credit-env-py3.11`, `credit-env-casper-py3.11`, or
-`credit-env-derecho-py3.11` (and e.g. `credit-env-py3.12` with
-`--python-version 3.12`). Different versions — and the `--uv` backend
-(`…-uv`) — coexist in distinct prefixes.
+script uses the portable `default` configuration. Each environment installs
+into a **content-addressed** prefix alongside this script, named
+`<backend>-credit-env[-<host>]-<sha>` — e.g. `conda-credit-env-6dbcaf4e`,
+`conda-credit-env-casper-7f3e91c0`, or `uv-credit-env-derecho-22ab90ff`. The
+`<sha>` is a short hash of a canonical manifest of **every** input that affects
+the build (backend, host, Python, torch, CUDA, pip target, …), so any
+permutation gets its own prefix and they all coexist — change any of them and
+you get a new directory rather than clobbering an existing one. The same logical
+config always resolves to the same prefix regardless of how the flags were
+spelled or ordered. Ask the script for a prefix with `--print-env-dir`, and list
+what is built with `--list` (both read the on-disk manifest, not your flags).
 
 ### Supported hosts
 
@@ -58,11 +63,13 @@ These work identically whether the script is sourced or executed:
 | Option            | Effect                                                                 |
 | ----------------- | ---------------------------------------------------------------------- |
 | `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on all hosts (`default`/`casper`/`derecho`). |
-| `--python-version X.Y` | Python version to build with (default `3.11`). Always encoded into the prefix (e.g. `credit-env-py3.12`), so versions coexist. Accepts `--python-version 3.12` or `--python-version=3.12`. |
+| `--python-version X.Y` | Python version to build with (default `3.11`). Folded into the prefix's config hash, so different versions get distinct prefixes and coexist. Accepts `--python-version 3.12` or `--python-version=3.12`. |
 | `--torch-version X.Y.Z` | Pin the torch version on the pip line. On a CUDA build (CUDA host or `--cuda-version`) it becomes `torch==<ver>+cu<tag>` (default `2.10.0`); on a plain CPU build it pins `torch==<ver>` from PyPI. Omitted → torch is left unpinned (CPU) or defaults to `2.10.0` (CUDA). Accepts the `=` form too. |
 | `--cuda-version X.Y` | CUDA build of torch, e.g. `12.6` → the `cu126` PyTorch wheels + matching `--extra-index-url`. Defaults per host (`casper` 12.6, `derecho` 12.9); on `default` it opts into a CUDA build (otherwise plain torch from PyPI). |
 | `--verbose`, `-v` | Show module/backend setup output (suppressed by default). Also echoes the assembled `pip install` command. |
 | `--rebuild`, `-r` | Rebuild even if the environment exists. The old prefix is moved aside and removed in the background, then a fresh environment is built. |
+| `--print-env-dir` | Resolve and print the (SHA-named) env prefix for the given flags, then stop — no build, no activation. Lets CI/PBS scripts ask for the path instead of predicting it. |
+| `--list`          | List the built environments (backend/host/python/torch/CUDA) read from each prefix's `credit-env.manifest`, then stop. |
 | `--help`, `-h`    | Print usage and stop.                                                  |
 
 ### Alternative: the `uv` backend (`--uv`)
@@ -82,9 +89,11 @@ unchanged.
   backend is loaded). The script does **not** bootstrap uv for you; install it
   per the [uv docs](https://docs.astral.sh/uv/getting-started/installation/)
   or `module load uv` first.
-- The uv env gets its **own prefix** (`credit-env-uv`, `credit-env-casper-uv`,
-  `credit-env-derecho-uv`) so a uv build and a conda build can coexist. Activate
-  it the standard venv way: `source envs/credit-env-uv/bin/activate`.
+- The uv env gets its **own prefix** (`uv-credit-env[-<host>]-<sha>`, the
+  `backend` field of the manifest differs from conda) so a uv build and a conda
+  build coexist. Re-activate it idempotently with `source envs/config_env.sh
+  --uv` (or `source "$(envs/config_env.sh --uv --print-env-dir)/bin/activate"`
+  for the bare venv path).
 - `mpi4py` is still forced to a source build, via uv's `--no-binary mpi4py`
   (uv does not honor pip's `PIP_NO_BINARY`).
 - **`derecho` is supported under `--uv`.** Its one *non-Python* build dependency
