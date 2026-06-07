@@ -45,11 +45,21 @@ jobs:
   contract:
     name: contract / ${{ matrix.os }} / ${{ matrix.shell }}
     runs-on: ${{ matrix.os }}
+    # Windows runners default to PowerShell; force bash (git-bash ships on the
+    # runner) so the POSIX run blocks below execute everywhere. No-op on
+    # Linux/macOS, where bash is already the default.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         shell: [bash, zsh]
+        exclude:
+          # Windows runners have no zsh, so the bash leg is the only one there.
+          - os: windows-latest
+            shell: zsh
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -63,13 +73,16 @@ jobs:
       - name: Syntax check (bash -n and zsh -n)
         run: |
           # config_env.sh + host_config.sh + default_versions.sh are sourced
-          # under bash AND zsh.
+          # under bash AND zsh. (Windows runners have no zsh, so the zsh -n
+          # checks are skipped there; bash -n still runs everywhere.)
           bash -n envs/config_env.sh
-          zsh  -n envs/config_env.sh
           bash -n envs/host_config.sh
-          zsh  -n envs/host_config.sh
           bash -n envs/default_versions.sh
-          zsh  -n envs/default_versions.sh
+          if [ "$RUNNER_OS" != Windows ]; then
+            zsh -n envs/config_env.sh
+            zsh -n envs/host_config.sh
+            zsh -n envs/default_versions.sh
+          fi
           # create_env.sh is execute-only (a bash subprocess), like
           # build-aws-ofi-nccl-plugin.sh -> bash-only.
           bash -n envs/create_env.sh
@@ -200,9 +213,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         shell: [bash, zsh]
         backend: [conda, uv]
+        exclude:
+          # Windows runners have no zsh, so the bash leg is the only one there.
+          - os: windows-latest
+            shell: zsh
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
