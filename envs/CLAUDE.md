@@ -117,6 +117,12 @@ script is sourced into interactive shells and PBS run scripts):
   fully expanded pip command (the line is assembled dynamically). Neither version
   is encoded in the prefix — two CUDA variants share a prefix; use `--rebuild` to
   switch an existing env.
+  - **`--torch-version` also pins a plain CPU build.** When no CUDA build is
+    requested (no `--cuda-version`, non-CUDA host) but `--torch-version` is given,
+    `__ce_host_config` sets `__CE_TORCH_SPEC=torch==<ver>` with an empty
+    `PIP_EXTRA_URL` → the CPU wheel from PyPI (no `+cu` tag, no extra index). With
+    NEITHER flag, torch stays unpinned (pyproject's bare `torch`). This `elif` arm
+    is what lets `ci-matrix.yml` vary torch on linux-amd64 CPU runners.
 
 ## derecho / OFI plugin (the `NEEDS_OFI_PLUGIN` path)
 
@@ -150,13 +156,29 @@ script is sourced into interactive shells and PBS run scripts):
   `--rebuild` → `pipdeptree`/`pytest`, plus (derecho) `ldd`/`readelf` that the
   plugin resolves `libhwloc.so.15` into `dependencies/hwloc-env/lib`.
 
-## CI notes (`ci-config-env.yml`)
+## CI notes (`ci-config-env.yml`, `ci-matrix.yml`)
 
-- Triggers on PRs to `staging`/`main` touching `envs/**`, `pyproject.toml`, or the
-  workflow; plus `workflow_dispatch`. Matrix: {ubuntu-x86_64, ubuntu-arm64,
-  macos-arm64} × {bash, zsh}; `full-build` adds × {conda, uv}.
-- `matrix` is **not** allowed in a step's `shell:` field — every step runs under
-  `shell: bash` and invokes the shell-under-test inside the run block.
+- **`ci-config-env.yml` tests the SCRIPT**; **`ci-matrix.yml` tests the credit
+  SOURCE** across a `python × torch × backend` matrix. Both share the composite
+  action **`.github/actions/build-credit-env`** (the extracted `full-build` body:
+  fresh build → idempotent activate → source-activate+no-pollution → optional
+  `--rebuild` / verify-torch / pipdeptree / pytest, gated by `rebuild` /
+  `introspect` / `run-tests` inputs). `cuda-version` uses the sentinel `disabled`
+  (= don't pass `--cuda-version`); a real value is reserved for a future GPU leg.
+- `ci-config-env.yml` triggers on PRs to `staging`/`main` touching `envs/**`,
+  `pyproject.toml`, or the workflow; plus `workflow_dispatch`. Matrix:
+  {ubuntu-x86_64, ubuntu-arm64, macos-arm64} × {bash, zsh}; `full-build` adds
+  × {conda, uv} and calls the action at defaults (py3.11, no torch pin, all legs
+  on) — behavior identical to before the extraction. The `contract` job stays
+  inline (it tests arg-parsing/pollution, not the build).
+- `ci-matrix.yml` triggers on **any** PR to `main`/`staging` (no paths filter) +
+  `workflow_dispatch`. Matrix: {3.11, 3.12, 3.13} × {2.10.0, 2.11.0} × {conda, uv}
+  on linux-amd64/bash; `rebuild`+`introspect` off, pytest + verify-torch on. Each
+  leg passes `--torch-version` only → the CPU torch-pin `elif` arm.
+- `matrix` is **not** allowed in a step's `shell:` field (and is invisible inside
+  a composite action) — steps run under `shell: bash`/`inputs.shell` and invoke
+  the shell-under-test inside the run block. Every `run:` in the composite action
+  must declare an explicit `shell:`.
 - Temp source-mode scripts run **without `set -e`** on purpose (the script is meant
   to be sourced into a normal shell; e.g. `module try-load` returns 127 off-HPC).
 - **Honest-by-design:** heavy legs may go red where the scientific stack or

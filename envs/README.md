@@ -59,7 +59,7 @@ These work identically whether the script is sourced or executed:
 | ----------------- | ---------------------------------------------------------------------- |
 | `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on all hosts (`default`/`casper`/`derecho`). |
 | `--python-version X.Y` | Python version to build with (default `3.11`). Always encoded into the prefix (e.g. `credit-env-py3.12`), so versions coexist. Accepts `--python-version 3.12` or `--python-version=3.12`. |
-| `--torch-version X.Y.Z` | torch version pinned on the pip line for CUDA-enabled hosts (default `2.10.0`). Combined with `--cuda-version` into `torch==<ver>+cu<tag>`. Accepts the `=` form too. |
+| `--torch-version X.Y.Z` | Pin the torch version on the pip line. On a CUDA build (CUDA host or `--cuda-version`) it becomes `torch==<ver>+cu<tag>` (default `2.10.0`); on a plain CPU build it pins `torch==<ver>` from PyPI. Omitted → torch is left unpinned (CPU) or defaults to `2.10.0` (CUDA). Accepts the `=` form too. |
 | `--cuda-version X.Y` | CUDA build of torch, e.g. `12.6` → the `cu126` PyTorch wheels + matching `--extra-index-url`. Defaults per host (`casper` 12.6, `derecho` 12.9); on `default` it opts into a CUDA build (otherwise plain torch from PyPI). |
 | `--verbose`, `-v` | Show module/backend setup output (suppressed by default). Also echoes the assembled `pip install` command. |
 | `--rebuild`, `-r` | Rebuild even if the environment exists. The old prefix is moved aside and removed in the background, then a fresh environment is built. |
@@ -152,6 +152,15 @@ Linux arm64, and macOS arm64, each under **both `bash` and `zsh`**:
 - **full build**: a real `--rebuild`, then idempotent activate and
   source-activate, plus a post-install health check (`probe_installed_env.py`)
   that imports `torch`/`credit` and reports the CUDA/NCCL state.
+
+The heavy **full build** legs live in the reusable composite action
+[`.github/actions/build-credit-env`](../.github/actions/build-credit-env/action.yml),
+which a second workflow,
+[`.github/workflows/ci-matrix.yml`](../.github/workflows/ci-matrix.yml), reuses to
+test the **credit source** across a `python {3.11,3.12,3.13} × torch {2.10.0,2.11.0}
+× backend {conda,uv}` matrix on linux-amd64/bash. It runs on **any** PR to
+`main`/`staging` (no paths filter) and pins each torch via `--torch-version` (CPU
+wheels), asserting the pin took before running `pytest`.
 
 **Rule — keep the environment minimal.** The environment is the runtime users
 source on laptops and HPC, so CI/diagnostic tooling must **not** be added to
