@@ -9,9 +9,11 @@ name: CI env matrix
 # from PyPI and the action's "Verify pinned torch version" step asserts it took.
 #
 # Scope kept deliberately portable: linux-amd64 + bash only (the OS/arch/shell
-# breadth lives in ci-config-env.yml). The `--rebuild` and pipdeptree
-# introspection legs are skipped here -- ci-config-env.yml already exercises
-# them -- so each leg is build -> activate -> source -> verify-torch -> pytest.
+# breadth lives in ci-config-env.yml). The `--rebuild` leg is skipped here
+# (ci-config-env.yml already exercises it); pipdeptree introspection IS run so
+# each leg surfaces the RESOLVED versions (torch, torchvision, numpy, ...) for
+# its python×torch combo. So each leg is build -> activate -> source ->
+# verify-torch -> introspect -> pytest.
 # Honest by design: a (python, torch) combo with no matching CPU wheel (or a
 # torchvision lag) goes red; fail-fast is off so one red leg never masks the
 # rest. Unlike ci-config-env.yml this runs on ANY PR to main/staging (no paths
@@ -56,5 +58,8 @@ jobs:
           python-version: ${{ matrix.python }}
           torch-version: ${{ matrix.torch }}
           rebuild: 'false'
-          introspect: 'false'
+          # introspect ON: pipdeptree shows the RESOLVED versions (torch,
+          # torchvision, numpy, ...) per python×torch leg -- the useful payoff of
+          # the matrix. The --rebuild leg stays off (ci-config-env covers it).
+          introspect: 'true'
           run-tests: 'true'
