@@ -130,11 +130,16 @@ runs:
     - name: "Source: activate marker + no pollution"
       shell: bash
       run: |
-        # CE_ARGS/CE_ENV/CE_MARKER are in $GITHUB_ENV, so they reach the temp
-        # script the matrix shell runs.  The marker is resolved indirectly so
-        # one check covers both CONDA_PREFIX and VIRTUAL_ENV (bash & zsh safe).
+        # CE_ENV/CE_MARKER are in $GITHUB_ENV, so they reach the temp script the
+        # matrix shell runs.  CE_ARGS must NOT be expanded INSIDE the temp script
+        # though: zsh does not word-split an unquoted $CE_ARGS (bash does), so a
+        # multi-token value like "--python-version 3.11" would arrive as a single
+        # bogus argument under zsh.  Instead we let THIS bash run block word-split
+        # $CE_ARGS and pass the tokens as positional args; the script uses "$@",
+        # which expands correctly in BOTH bash and zsh.  The marker is resolved
+        # indirectly so one check covers both CONDA_PREFIX and VIRTUAL_ENV.
         cat > "$RUNNER_TEMP/src_activate.sh" <<'EOF'
-        source envs/config_env.sh $CE_ARGS; rc=$?
+        source envs/config_env.sh "$@"; rc=$?
         [ "$rc" -eq 0 ] || { echo "FAIL: source rc=$rc"; exit 1; }
         eval "marker_val=\${$CE_MARKER}"
         case "$marker_val" in
@@ -146,7 +151,7 @@ runs:
         done
         echo "OK: source-activate leaves no residue"
         EOF
-        ${{ inputs.shell }} "$RUNNER_TEMP/src_activate.sh"
+        ${{ inputs.shell }} "$RUNNER_TEMP/src_activate.sh" $CE_ARGS
 
     - name: "Execute: rebuild (-r)"
       if: inputs.rebuild == 'true'
