@@ -138,11 +138,24 @@ interactively to locate a prefix.
 
 ## Implementation notes / non-obvious issues
 
-- **Portable hashing.** macOS runners have no `sha256sum` (it is
-  `shasum -a 256`); casper/derecho have `sha256sum`. Add a `__ce_sha` helper that
-  tries `sha256sum` → `shasum -a 256` → `openssl dgst -sha256`, bash+zsh safe.
-  It and any new vars must be added to the relevant `__ce_*_cleanup` lists
-  (invariant #3, "zero shell-state pollution when sourced").
+- **Portable hashing.** The hash is computed in `__ce_host_config` at
+  config-resolution time — *before* the target env is built, and (on the
+  `default` host) potentially before any module puts a Python on `PATH`. So the
+  hasher must not depend on the very interpreter these scripts exist to
+  provision. Add a `__ce_sha` helper that tries `sha256sum` →
+  `shasum -a 256` (macOS has no `sha256sum`) → `openssl dgst -sha256`, all of
+  which are coreutils/openssl-level and present on bare login nodes and both
+  macOS and Linux runners. Normalize to field 1 (`sha256sum`/`shasum` emit
+  `<hash>  -`; openssl emits `(stdin)= <hash>` / `SHA2-256(stdin)= <hash>` on v3
+  — strip accordingly). bash+zsh safe; the helper and any new vars go in the
+  relevant `__ce_*_cleanup` lists (invariant #3, "zero shell-state pollution").
+  - **Why not `python -c 'hashlib...'` as the primary?** It's tempting because
+    its output is already bare (`<hash>`, no column/prefix to strip) and the
+    digest is interpreter-independent, so parent/child agreement is never at
+    risk. But it reintroduces a bootstrap dependency on a `python3` that may not
+    be on `PATH` yet — exactly the chicken-and-egg the binary tools avoid. Keep
+    Python as a *last-resort* fallback only, not the entry point; the cleaner
+    output isn't worth the dependency given the chain already normalizes.
 - **CI must stop hardcoding the name.** `.github/actions/build-credit-env/action.yml`
   currently recomputes `CE_ENV=credit-env-py<X.Y>[-uv]` to assert
   `test -d envs/$CE_ENV`. With a SHA name it must capture
