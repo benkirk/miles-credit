@@ -52,10 +52,14 @@ source "${SCRIPTDIR}/host_config.sh"
 #----------------------------------------------------------------------------
 __ce_usage() {
     cat <<USAGE
-Usage: [source] config_env.sh [--uv] [--python-version X.Y]
+Usage: [source] config_env.sh [--conda | --uv] [--python-version X.Y]
                               [--torch-version X.Y.Z] [--cuda-version X.Y]
                               [--verbose] [--rebuild] [--help]
 
+  --conda         Use conda for packaging (the default backend on every host).
+                  Provided for symmetry with --uv so the backend can be pinned
+                  explicitly rather than relying on the default.  If both --conda
+                  and --uv are given, the last one wins.
   --uv            Use the 'uv' package installer and a uv-managed venv instead
                   of conda.  Supported on all hosts (default/casper/derecho).
                   uv must already be on PATH (or available as a module); it is
@@ -129,6 +133,7 @@ __ce_parse_args() {
             continue
         fi
         case "${__ce_arg}" in
+            --conda)              CREDIT_BACKEND="conda" ;;
             --uv)                 CREDIT_BACKEND="uv" ;;
             --python-version)     __ce_expect_val="python-version" ;;
             --python-version=*)   CREDIT_PYTHON_VERSION="${__ce_arg#*=}" ;;

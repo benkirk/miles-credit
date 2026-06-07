@@ -56,6 +56,10 @@ source "${SCRIPTDIR}/default_versions.sh"
 # CUDA/torch selection (resolution order: CLI flag > per-host default > global):
 #   __CE_WANT_CUDA   - 0/1 (does this host install a CUDA torch build?)
 #   __CE_DEFAULT_CUDA- per-host default CUDA version, or "" to use the global one
+#   __CE_CUDA_VER    - the RESOLVED CUDA version (e.g. 12.8), or "" on non-CUDA
+#                      installs.  Computed once here so consumers (e.g. the
+#                      aws-ofi-nccl plugin build) need not re-derive the
+#                      precedence.
 #   global defaults  - torch + CUDA defaults come from default_versions.sh
 #                      (CREDIT_DEFAULT_TORCH_VERSION / CREDIT_DEFAULT_CUDA_VERSION)
 # The 'default' host installs a CUDA build only if the user passes --cuda-version.
@@ -76,6 +80,7 @@ __ce_host_config() {
     __CE_EXPECT_NCCL=0
     __CE_WANT_CUDA=0
     __CE_DEFAULT_CUDA=""
+    __CE_CUDA_VER=""
 
     case "${TARGET_HOST}" in
 
@@ -119,7 +124,7 @@ __ce_host_config() {
         __CE_CUDA_TAG="cu${__CE_CUDA_VER//./}"
         PIP_EXTRA_URL="https://download.pytorch.org/whl/${__CE_CUDA_TAG}"
         __CE_TORCH_SPEC="torch==${__CE_TORCH_VER}+${__CE_CUDA_TAG}"
-        unset __CE_TORCH_VER __CE_CUDA_VER __CE_CUDA_TAG
+        unset __CE_TORCH_VER __CE_CUDA_TAG   # keep __CE_CUDA_VER (a documented output)
     elif [ -n "${CREDIT_TORCH_VERSION}" ]; then
         # No CUDA build requested, but the user pinned a torch version with
         # --torch-version: pin the CPU build of torch from PyPI.  PIP_EXTRA_URL
@@ -151,7 +156,7 @@ __ce_host_config() {
 __ce_host_config_cleanup() {
     unset ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
           __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
-          __CE_WANT_CUDA __CE_DEFAULT_CUDA 2>/dev/null
+          __CE_WANT_CUDA __CE_DEFAULT_CUDA __CE_CUDA_VER 2>/dev/null
     unset -f __ce_host_config 2>/dev/null
     # Clean up the default_versions.sh state we sourced in (defensive: it may be
     # absent if sourcing failed).  Self-unsets the CREDIT_DEFAULT_* constants.
