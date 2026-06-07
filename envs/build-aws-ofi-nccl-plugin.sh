@@ -10,6 +10,12 @@ SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
 AWS_OFI_NCCL_VERSION="${AWS_OFI_NCCL_VERSION:-${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION:-v1.19.2}}"
 OFI_HOME=${NCAR_ROOT_LIBFABRIC}
 
+# Match the standalone hwloc to the CUDA the rest of the env uses.  create_env.sh
+# exports the resolved (CLI>host>global) choice; standalone runs fall back to the
+# central default.  Strip the dot for the conda build string (12.8 -> cuda128).
+CUDA_VERSION="${CREDIT_CUDA_VERSION:-${CREDIT_DEFAULT_CUDA_VERSION:-12.9}}"
+CUDA_CONDA_BUILD="cuda${CUDA_VERSION//./}"
+
 # The plugin and its non-Python build dependencies (hwloc) install under a
 # single per-environment "dependencies" prefix, INDEPENDENT of the Python
 # packaging backend (conda or uv).  config_env.sh exports AWS_OFI_PLUGIN_HOME
@@ -47,10 +53,10 @@ else
             echo "       'module load conda' (or install conda) and retry." >&2
             exit 1
         }
-        # CONDA_OVERRIDE_CUDA lets the cuda129 build resolve on a driverless
+        # CONDA_OVERRIDE_CUDA lets the cudaNNN build resolve on a driverless
         # login node, where conda's __cuda virtual package is otherwise absent.
-        CONDA_OVERRIDE_CUDA="12.9" conda create --yes --prefix "${HWLOC_PREFIX}" \
-              -c conda-forge "libhwloc=*=cuda129*" cuda-version=12.9 pkg-config
+        CONDA_OVERRIDE_CUDA="${CUDA_VERSION}" conda create --yes --prefix "${HWLOC_PREFIX}" \
+              -c conda-forge "libhwloc=*=${CUDA_CONDA_BUILD}*" cuda-version="${CUDA_VERSION}" pkg-config
     else
         echo "==> reusing standalone hwloc at ${HWLOC_PREFIX}"
     fi

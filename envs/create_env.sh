@@ -131,6 +131,7 @@ if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
     # NOT report success.
     export AWS_OFI_NCCL_VERSION="${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}"   # default_versions.sh
     export AWS_OFI_PLUGIN_HOME="${ENV_DIR}/dependencies"
+    export CREDIT_CUDA_VERSION="${__CE_CUDA_VER}"   # resolved CLI>host>global; for hwloc's conda build
     ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh || {
         echo "create_env.sh: aws-ofi-nccl plugin build failed." >&2
         exit 1
