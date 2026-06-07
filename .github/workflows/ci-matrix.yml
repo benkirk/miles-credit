@@ -5,7 +5,7 @@ name: CI env matrix
 # version-coverage counterpart to ci-config-env.yml (which tests the installer
 # SCRIPT itself); both share the ./.github/actions/build-credit-env composite
 # action. The torch axis is genuinely exercised: each leg passes --torch-version
-# with NO --cuda-version, so host_config.sh pins the CPU build (torch==<ver>)
+# with NO --cuda-version, so versions_config.sh pins the CPU build (torch==<ver>)
 # from PyPI and the action's "Verify pinned torch version" step asserts it took.
 #
 # Scope kept deliberately portable: linux-amd64 + bash only (the OS/arch/shell

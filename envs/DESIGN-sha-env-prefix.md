@@ -1,6 +1,7 @@
 # Design: content-addressed environment prefixes
 
-**Status:** ADOPTED. Implemented in `host_config.sh` / `create_env.sh` /
+**Status:** ADOPTED. Implemented in `versions_config.sh` (formerly `host_config.sh`
++ `default_versions.sh`, since merged) / `create_env.sh` /
 `config_env.sh` / the CI action / `.gitignore`; user docs (`README.md`,
 `CLAUDE.md`) updated. Decisions taken at adoption (refining the open questions
 below): **short-SHA = 8 hex**; **manifest filename = `credit-env.manifest`**
@@ -12,7 +13,8 @@ never invalidates the default/casper envs that never build the plugin).
 ## Problem
 
 The env prefix is built in one place — `__ce_host_config` in
-[`host_config.sh`](host_config.sh) — as:
+[`versions_config.sh`](versions_config.sh) (at the time of writing,
+`host_config.sh`) — as:
 
 ```
 credit-env[-<host>]-py<X.Y>[-uv]
@@ -83,7 +85,7 @@ args. This is what delivers goals (1) and (2):
 
 - `--cuda-version 12.6` on casper and the casper default resolve to the *same*
   manifest → *same* SHA → *same* dir. Flag spelling/order is irrelevant.
-- Bumping a default in `default_versions.sh` changes the manifest → new SHA →
+- Bumping a default in `versions_config.sh` changes the manifest → new SHA →
   new dir (correct: it is a different environment).
 
 ```
@@ -179,7 +181,7 @@ interactively to locate a prefix.
 
 | File | Change |
 | --- | --- |
-| `host_config.sh` | Build manifest string + `__ce_sha` helper; set `ENV_NAME`/`ENV_DIR` from `<backend>-credit-env[-host]-<sha>`; export the manifest for the writer; extend cleanup. |
+| `versions_config.sh` | Build manifest string + `__ce_sha` helper; set `ENV_NAME`/`ENV_DIR` from `<backend>-credit-env[-host]-<sha>`; export the manifest for the writer; extend cleanup. |
 | `create_env.sh` | Write `<ENV_DIR>/credit-env.manifest`; success messages use the new name. |
 | `config_env.sh` | `--print-env-dir` (resolve-only) and `--list` (inventory) modes; manifest-match guard on the activate path; arg parsing + cleanup + usage. |
 | `.github/actions/build-credit-env/action.yml` | Replace hardcoded `CE_ENV` with `--print-env-dir` capture. |

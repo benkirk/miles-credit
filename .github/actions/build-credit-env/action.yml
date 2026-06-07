@@ -155,7 +155,7 @@ runs:
           */envs/$CE_ENV) echo "OK: $CE_MARKER=$marker_val" ;;
           *) echo "FAIL: $CE_MARKER not the env: '$marker_val'"; exit 1 ;;
         esac
-        for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_default_versions_cleanup __ce_sha __ce_list __ce_check_manifest run_quiet; do
+        for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_list __ce_check_manifest run_quiet; do
           if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
         done
         echo "OK: source-activate leaves no residue"

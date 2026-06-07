@@ -11,8 +11,8 @@
 # vars, and activation in the caller's shell, and orchestrates the rest.  Two
 # concerns live in sibling files so this one stays small and the build can grow
 # without touching the delicate dual-mode/no-pollution plumbing:
-#   host_config.sh - per-host policy (single source of truth; SOURCED by both
-#                    this file and create_env.sh)
+#   versions_config.sh - default versions + per-host policy (single source of
+#                    truth; SOURCED by both this file and create_env.sh)
 #   create_env.sh  - the build recipe (EXECUTE-ONLY; invoked as a SUBPROCESS
 #                    when the env is absent, so it pollutes nothing)
 # The dual-mode return/exit must happen at the top level of a sourced file, so
@@ -36,13 +36,13 @@ else
 fi
 SCRIPTDIR="$(realpath "$(dirname "$(realpath "${SCRIPT_PATH}")")")"
 
-# Per-host policy lives in a sibling file, SOURCED here (so the entry point and
-# the build subprocess share ONE source of truth).  Must be sourced at top
-# level: __ce_host_config sets scalars the caller's shell then activates from.
-# host_config.sh in turn sources default_versions.sh, so the CREDIT_DEFAULT_*
-# defaults (consumed by __ce_parse_args / __ce_usage below) are in scope after
-# this line; its cleanup is reached via __ce_host_config_cleanup.
-source "${SCRIPTDIR}/host_config.sh"
+# Versions + per-host policy live in a sibling file, SOURCED here (so the entry
+# point and the build subprocess share ONE source of truth).  Must be sourced at
+# top level: __ce_host_config sets scalars the caller's shell then activates from.
+# versions_config.sh defines the CREDIT_DEFAULT_* defaults (consumed by
+# __ce_parse_args / __ce_usage below), so they are in scope after this line; its
+# cleanup is reached via __ce_host_config_cleanup.
+source "${SCRIPTDIR}/versions_config.sh"
 
 
 #============================================================================
@@ -151,9 +151,9 @@ run_quiet() {
 __ce_parse_args() {
     CREDIT_VERBOSE=0
     REBUILD=0
-    CREDIT_BACKEND="${CREDIT_DEFAULT_BACKEND}"          # default_versions.sh
-    CREDIT_PYTHON_VERSION="${CREDIT_DEFAULT_PYTHON_VERSION}"  # default_versions.sh
-    CREDIT_TORCH_VERSION=""          # empty = use default_versions.sh default
+    CREDIT_BACKEND="${CREDIT_DEFAULT_BACKEND}"          # versions_config.sh
+    CREDIT_PYTHON_VERSION="${CREDIT_DEFAULT_PYTHON_VERSION}"  # versions_config.sh
+    CREDIT_TORCH_VERSION=""          # empty = use versions_config.sh default
     CREDIT_CUDA_VERSION=""           # empty = use host/global default
     __ce_show_help=0
     __ce_print_dir=0          # --print-env-dir: resolve ENV_DIR and stop
@@ -340,8 +340,9 @@ __ce_source_runtime_hooks() {
 # Tidy up all shell state (important when SOURCED -- functions and vars defined
 # here would otherwise persist in the caller's interactive shell).
 # NOTE: when adding a new function/var above, add its name here too.  The
-# host-policy vars/functions are owned by host_config.sh and cleaned up by its
-# __ce_host_config_cleanup (invoked below), so they are NOT listed here.
+# host-policy vars/functions AND the CREDIT_DEFAULT_* constants are owned by
+# versions_config.sh and cleaned up by its __ce_host_config_cleanup (invoked
+# below), so they are NOT listed here.
 __ce_cleanup() {
     unset CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
           TARGET_HOST CONDA_ROOT \
@@ -349,8 +350,9 @@ __ce_cleanup() {
     unset -f __ce_usage __ce_list run_quiet __ce_parse_args __ce_setup_modules \
              __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
              __ce_check_manifest __ce_activate_if_exists __ce_source_runtime_hooks __ce_run 2>/dev/null
-    # Clean up the host_config.sh state we sourced in (defensive: it may be
-    # absent if sourcing failed).  Self-unsets __ce_host_config[_cleanup].
+    # Clean up the versions_config.sh state we sourced in (defensive: it may be
+    # absent if sourcing failed).  Self-unsets __ce_host_config[_cleanup], __ce_sha,
+    # the host-policy scalars, AND the CREDIT_DEFAULT_* constants.
     command -v __ce_host_config_cleanup >/dev/null 2>&1 && __ce_host_config_cleanup
     unset -f __ce_cleanup 2>/dev/null   # self-unset LAST
     return "${1:-0}"                    # propagate the status passed in

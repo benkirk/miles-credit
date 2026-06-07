@@ -16,27 +16,27 @@
 # "success".
 #
 # Inputs (from the environment the parent exports / inherits):
-#   CREDIT_BACKEND        - "conda" or "uv" (default from default_versions.sh)
+#   CREDIT_BACKEND        - "conda" or "uv" (default from versions_config.sh)
 #   CREDIT_VERBOSE        - 0/1 (forwarded to the probe; also echoes the pip command)
-#   CREDIT_PYTHON_VERSION - Python to build with (default from default_versions.sh)
-#   CREDIT_TORCH_VERSION  - optional torch version pin (empty -> default_versions.sh default)
+#   CREDIT_PYTHON_VERSION - Python to build with (default from versions_config.sh)
+#   CREDIT_TORCH_VERSION  - optional torch version pin (empty -> versions_config.sh default)
 #   CREDIT_CUDA_VERSION   - optional CUDA build of torch (empty -> host/global default)
 #   NCAR_HOST      - host id (-> TARGET_HOST); already in the HPC environment
 #   plus the module environment the parent loaded (PATH/CC/CUDA_HOME/...),
 #   which IS inherited by this subprocess.
 #
 # Host policy (ENV_DIR, pip target, NCCL/OFI flags) is recomputed HERE from the
-# shared host_config.sh given the same TARGET_HOST/CREDIT_BACKEND, so parent and child
-# agree by construction rather than via a fragile export list.
+# shared versions_config.sh given the same TARGET_HOST/CREDIT_BACKEND, so parent and
+# child agree by construction rather than via a fragile export list.
 #----------------------------------------------------------------------------
 
 
 SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPTDIR}/host_config.sh"
+source "${SCRIPTDIR}/versions_config.sh"
 
-CREDIT_BACKEND="${CREDIT_BACKEND:-${CREDIT_DEFAULT_BACKEND}}"          # default_versions.sh (via host_config.sh)
+CREDIT_BACKEND="${CREDIT_BACKEND:-${CREDIT_DEFAULT_BACKEND}}"          # versions_config.sh
 CREDIT_VERBOSE="${CREDIT_VERBOSE:-0}"
-CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION:-${CREDIT_DEFAULT_PYTHON_VERSION}}"  # default_versions.sh
+CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION:-${CREDIT_DEFAULT_PYTHON_VERSION}}"  # versions_config.sh
 CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION:-}"
 CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION:-}"
 TARGET_HOST="${NCAR_HOST:-default}"
@@ -58,7 +58,7 @@ fi
 
 #-------------------------------------------------------
 # create a minimal isolated environment with a controlled Python (the default
-# lives in default_versions.sh; set by --python-version, passed in as
+# lives in versions_config.sh; set by --python-version, passed in as
 # CREDIT_PYTHON_VERSION)
 if [ "${CREDIT_BACKEND}" = "uv" ]; then
     # Force a uv-managed standalone CPython (--managed-python) so the venv
@@ -106,7 +106,7 @@ else
     set -- pip install -e "${PIP_TARGET_SPEC}"
 fi
 # Pin torch (version + CUDA build) on the command line on CUDA hosts, with the
-# matching PyTorch index appended right after.  Both come from host_config.sh
+# matching PyTorch index appended right after.  Both come from versions_config.sh
 # (driven by --torch-version/--cuda-version) -- empty on non-CUDA installs.
 [ -n "${__CE_TORCH_SPEC}" ] && set -- "$@" "${__CE_TORCH_SPEC}"
 [ -n "${PIP_EXTRA_URL}" ]   && set -- "$@" --extra-index-url "${PIP_EXTRA_URL}"
@@ -129,7 +129,7 @@ if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
     # CUDA-aware hwloc there when the system lacks the dev headers, and makes
     # its own hwloc prefix/rpath decision.  Fail loudly: a broken plugin must
     # NOT report success.
-    export AWS_OFI_NCCL_VERSION="${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}"   # default_versions.sh
+    export AWS_OFI_NCCL_VERSION="${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}"   # versions_config.sh
     export AWS_OFI_PLUGIN_HOME="${ENV_DIR}/dependencies"
     export CREDIT_CUDA_VERSION="${__CE_CUDA_VER}"   # resolved CLI>host>global; for hwloc's conda build
     ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh || {

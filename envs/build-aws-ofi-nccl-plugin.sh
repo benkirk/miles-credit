@@ -1,10 +1,13 @@
 #!/bin/bash -eu
 
 # Pull in the central default versions (single source of truth) when present, so
-# the standalone default matches what create_env.sh exports.  Guarded + with a
-# literal last resort so this script still runs if the file is ever absent.
+# the standalone default matches what create_env.sh exports.  versions_config.sh
+# only assigns the CREDIT_DEFAULT_* constants + defines functions at source time
+# (nothing runs), so sourcing it here under `set -eu` is safe and we never call
+# __ce_host_config.  Guarded + with a literal last resort so this script still
+# runs if the file is ever absent.
 SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
-[ -f "${SCRIPTDIR}/default_versions.sh" ] && source "${SCRIPTDIR}/default_versions.sh"
+[ -f "${SCRIPTDIR}/versions_config.sh" ] && source "${SCRIPTDIR}/versions_config.sh"
 
 # Set environment variables for dependencies
 AWS_OFI_NCCL_VERSION="${AWS_OFI_NCCL_VERSION:-${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION:-v1.19.2}}"

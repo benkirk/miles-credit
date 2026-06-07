@@ -2,31 +2,44 @@
 
 
 #----------------------------------------------------------------------------
-# Per-host policy for the CREDIT environment scripts.
+# Versions + per-host policy for the CREDIT environment scripts -- the SINGLE
+# SOURCE OF TRUTH for BOTH the DEFAULT versions (python/torch/CUDA/AWS plugin +
+# the default backend) AND all per-host build policy (ENV_DIR, pip target, module
+# set, NCCL/OFI flags, the config manifest + its SHA).  Keeping both here means
+# every process derives identical values from the same code, with no fragile
+# cross-process export list.
 #
-# This file is SOURCED (never executed) by BOTH config_env.sh (the dual-mode
-# entry point) and create_env.sh (the build subprocess).  Keeping it here means
-# host policy stays a SINGLE SOURCE OF TRUTH: both processes derive the same
-# ENV_DIR / pip target / module set from the same code given the same
-# TARGET_HOST + CREDIT_BACKEND, with no fragile cross-process export list.
+# This file is SOURCED (never executed) by config_env.sh (the dual-mode entry
+# point), create_env.sh (the build subprocess), and build-aws-ofi-nccl-plugin.sh
+# (which only needs the CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION constant).  Sourcing
+# it just assigns the CREDIT_DEFAULT_* constants and DEFINES the functions below;
+# nothing runs, so it is safe to source even under `set -eu`.
 #
-# The sourcer MUST set SCRIPTDIR (the envs/ dir) BEFORE sourcing this file (it
-# is used immediately, below, to pull in default_versions.sh) and set
-# CREDIT_BACKEND and CREDIT_PYTHON_VERSION before calling __ce_host_config; it
-# reads TARGET_HOST too.  CREDIT_TORCH_VERSION and CREDIT_CUDA_VERSION are
-# optional inputs (empty => host/global defaults apply).
+# Bump a default = a one-line edit to the CREDIT_DEFAULT_* block below.
+#
+# Inputs to __ce_host_config (set by the sourcer BEFORE calling it): CREDIT_BACKEND
+# and CREDIT_PYTHON_VERSION; it reads TARGET_HOST too; CREDIT_TORCH_VERSION and
+# CREDIT_CUDA_VERSION are optional (empty => host/global defaults apply).  SCRIPTDIR
+# (the envs/ dir) need only be set before __ce_host_config is CALLED -- it is used
+# for ENV_DIR -- not at source time (this file no longer sources a sibling).
 #
 # Like config_env.sh this must be portable to BOTH bash and zsh (no associative
 # arrays; no reliance on word-splitting).
 #----------------------------------------------------------------------------
 
 
-# Central, single source of truth for the DEFAULT versions (python/torch/CUDA/
-# AWS plugin) and the default backend.  Sourcing it here is the one hop that
-# delivers the CREDIT_DEFAULT_* constants to BOTH config_env.sh and
-# create_env.sh, since both source this file at top level before they need a
-# default.  __ce_host_config_cleanup chains to its cleanup.
-source "${SCRIPTDIR}/default_versions.sh"
+# Central, single source of truth for the DEFAULT versions and the default
+# backend.  THIS is the one place to bump them.  Self-unset by
+# __ce_host_config_cleanup below (only meaningful when sourced into a long-lived
+# shell via config_env.sh; the create_env.sh / build-aws-ofi-nccl-plugin.sh
+# subprocesses never clean up -- they pollute nothing).
+CREDIT_DEFAULT_BACKEND="conda"          # packaging backend when --uv is absent
+CREDIT_DEFAULT_PYTHON_VERSION="3.11"    # --python-version default
+CREDIT_DEFAULT_TORCH_VERSION="2.10.0"   # --torch-version default (CUDA hosts)
+CREDIT_DEFAULT_CUDA_VERSION="12.6"      # global --cuda-version default; a host
+                                        # may override it (see __ce_host_config,
+                                        # e.g. derecho -> 12.9)
+CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION="v1.19.2"   # aws-ofi-nccl plugin tag
 
 
 #----------------------------------------------------------------------------
@@ -64,8 +77,8 @@ source "${SCRIPTDIR}/default_versions.sh"
 #                      installs.  Computed once here so consumers (e.g. the
 #                      aws-ofi-nccl plugin build) need not re-derive the
 #                      precedence.
-#   global defaults  - torch + CUDA defaults come from default_versions.sh
-#                      (CREDIT_DEFAULT_TORCH_VERSION / CREDIT_DEFAULT_CUDA_VERSION)
+#   global defaults  - torch + CUDA defaults come from the CREDIT_DEFAULT_* block
+#                      above (CREDIT_DEFAULT_TORCH_VERSION / CREDIT_DEFAULT_CUDA_VERSION)
 # The 'default' host installs a CUDA build only if the user passes --cuda-version.
 #
 # ADDING A HOST = add ONE case arm here.  Both config_env.sh's module-setup
@@ -214,10 +227,10 @@ __ce_sha() {
 __ce_host_config_cleanup() {
     unset ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
           __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
-          __CE_WANT_CUDA __CE_DEFAULT_CUDA __CE_CUDA_VER __CE_MANIFEST __CE_SHA 2>/dev/null
+          __CE_WANT_CUDA __CE_DEFAULT_CUDA __CE_CUDA_VER __CE_MANIFEST __CE_SHA \
+          CREDIT_DEFAULT_BACKEND CREDIT_DEFAULT_PYTHON_VERSION \
+          CREDIT_DEFAULT_TORCH_VERSION CREDIT_DEFAULT_CUDA_VERSION \
+          CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION 2>/dev/null
     unset -f __ce_host_config __ce_sha 2>/dev/null
-    # Clean up the default_versions.sh state we sourced in (defensive: it may be
-    # absent if sourcing failed).  Self-unsets the CREDIT_DEFAULT_* constants.
-    command -v __ce_default_versions_cleanup >/dev/null 2>&1 && __ce_default_versions_cleanup
     unset -f __ce_host_config_cleanup 2>/dev/null   # self-unset LAST
 }
