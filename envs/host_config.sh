@@ -120,6 +120,15 @@ __ce_host_config() {
         PIP_EXTRA_URL="https://download.pytorch.org/whl/${__CE_CUDA_TAG}"
         __CE_TORCH_SPEC="torch==${__CE_TORCH_VER}+${__CE_CUDA_TAG}"
         unset __CE_TORCH_VER __CE_CUDA_VER __CE_CUDA_TAG
+    elif [ -n "${CREDIT_TORCH_VERSION}" ]; then
+        # No CUDA build requested, but the user pinned a torch version with
+        # --torch-version: pin the CPU build of torch from PyPI.  PIP_EXTRA_URL
+        # stays empty (set above), so the default index serves the CPU wheel --
+        # no +cu<tag> suffix, no --extra-index-url.  When NEITHER a CUDA build
+        # nor --torch-version is requested, both arms are skipped and torch
+        # stays unpinned (pyproject's bare 'torch' resolves it) -- the original
+        # 'default' host behavior, preserved.
+        __CE_TORCH_SPEC="torch==${CREDIT_TORCH_VERSION}"
     fi
 
     # Encode the Python version into the prefix (always, even the default) so
