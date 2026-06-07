@@ -1,4 +1,4 @@
-name: CI config_env
+name: CI config_env.sh installer
 
 # Exercises envs/config_env.sh across OS/arch and shells. The script's contract
 # is: dual-mode (runnable OR sourceable), bash + zsh, idempotent activate, smart
