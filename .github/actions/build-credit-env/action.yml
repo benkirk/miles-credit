@@ -55,16 +55,30 @@ runs:
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y zsh
 
+    # venv ADOPTS the python3 on PATH (it does not provision one), so in CI we put
+    # a KNOWN interpreter there rather than depend on the runner image's drifting
+    # default python3 -- which varies by OS/image and may be a version the
+    # scientific stack has no wheels for (e.g. a macOS python3 newer than the
+    # conda/uv leg's 3.11).  This makes the venv leg test venv MECHANICS against a
+    # controlled python.  Must run BEFORE "Derive backend / arg vars" so
+    # --print-env-dir resolves (and the later build adopts) this same interpreter.
+    - name: Set up Python (venv backend)
+      if: inputs.backend == 'venv'
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
     # Single source of truth for the per-leg differences, written to $GITHUB_ENV
     # so the later steps (and any caller step) read them as plain $CE_* vars:
     #   CE_ARGS   - the config_env.sh flags assembled from the version inputs
     #   CE_ENV    - the env-dir basename we assert on
     #   CE_MARKER - the activation marker the source-activate check inspects
-    # The python version is ALWAYS passed -- even the default 3.11.  The prefix is
-    # now a content hash (<backend>-credit-env[-host]-<sha>), so CI can no longer
-    # predict it: we ask the script via --print-env-dir (resolve-only; needs no
-    # conda/uv, and the SHA is shell-independent so bash is fine) and take the
-    # basename.
+    # The python version is passed for conda/uv (which provision it); venv adopts
+    # the interpreter the setup-python step above placed on PATH, so it is NOT
+    # passed there (a mismatch would be a hard error).  The prefix is a content
+    # hash (<backend>-credit-env[-host]-<sha>), so CI can no longer predict it: we
+    # ask the script via --print-env-dir (resolve-only; for venv this resolves the
+    # PATH python, so it must run after setup-python) and take the basename.
     - name: Derive backend / arg vars
       shell: bash
       run: |
