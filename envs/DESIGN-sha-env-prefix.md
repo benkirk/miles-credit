@@ -1,6 +1,12 @@
 # Design: content-addressed environment prefixes
 
-**Status:** proposal (no code yet)
+**Status:** ADOPTED. Implemented in `host_config.sh` / `create_env.sh` /
+`config_env.sh` / the CI action / `.gitignore`; user docs (`README.md`,
+`CLAUDE.md`) updated. Decisions taken at adoption (refining the open questions
+below): **short-SHA = 8 hex**; **manifest filename = `credit-env.manifest`**
+(visible); **`--list` = fixed-column table** (no `--verbose` dump); and
+**`aws_ofi_nccl` is hashed only when `ofi_plugin=1`** (so bumping the OFI default
+never invalidates the default/casper envs that never build the plugin).
 **Scope:** `envs/` installer scripts + their CI; user docs updated on adoption.
 
 ## Problem

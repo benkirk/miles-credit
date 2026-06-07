@@ -179,4 +179,9 @@ wb2_figs/
 
 # MAC DS_Store files
 .DS_Store
+# Built CREDIT envs: content-addressed <backend>-credit-env[-host]-<sha>/ (new
+# scheme) plus the legacy credit-env*/ names (kept so any lingering old-scheme
+# dirs stay ignored during migration).  The credit-env.manifest lives inside the
+# ignored dir, so nothing new is tracked.
+envs/*-credit-env-*/
 envs/credit-env*/

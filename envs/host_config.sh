@@ -32,7 +32,11 @@ source "${SCRIPTDIR}/default_versions.sh"
 #----------------------------------------------------------------------------
 # Single source of truth for ALL per-host policy.  Sets plain scalars
 # (portable to bash AND zsh; no associative arrays):
-#   ENV_NAME         - base name + optional host suffix
+#   __CE_MANIFEST    - canonical config manifest (every build-affecting input,
+#                      fixed field order); hashed for the prefix and written
+#                      verbatim into the built env as credit-env.manifest.
+#   __CE_SHA         - 8-hex content hash of __CE_MANIFEST (via __ce_sha).
+#   ENV_NAME         - <backend>-credit-env[-<host>]-<__CE_SHA>
 #   ENV_DIR          - derived here, once
 #   PIP_EXTRA_URL    - bare extra-index URL, or "" (kept as a URL, not a
 #                      "--extra-index-url <url>" string, so we never depend
@@ -90,7 +94,6 @@ __ce_host_config() {
             ;;
 
         "casper")
-            ENV_NAME="${ENV_NAME}-${NCAR_HOST}"
             __CE_USE_MODULES=1
             PIP_TARGET_SPEC=".[distributed]"
             __CE_EXPECT_NCCL=1
@@ -98,7 +101,6 @@ __ce_host_config() {
             ;;
 
         "derecho")
-            ENV_NAME="${ENV_NAME}-${NCAR_HOST}"
             __CE_USE_MODULES=1
             __CE_CUDA_MODULE="cuda"
             PIP_TARGET_SPEC=".[distributed]"
@@ -136,15 +138,71 @@ __ce_host_config() {
         __CE_TORCH_SPEC="torch==${CREDIT_TORCH_VERSION}"
     fi
 
-    # Encode the Python version into the prefix (always, even the default) so
-    # envs built with different Python versions coexist and never cross-detect.
-    ENV_NAME="${ENV_NAME}-py${CREDIT_PYTHON_VERSION}"
+    # ----- content-addressed prefix -------------------------------------------
+    # Assemble a CANONICAL config manifest from every input that affects the
+    # build, in a FIXED field order; empty fields mean "does not apply".  Hashing
+    # this (not the raw CLI args) is what makes the prefix unique across every
+    # axis AND idempotent: flag spelling/order is irrelevant because the manifest
+    # is the already-resolved config.  Fields record build INTENT, not resolved
+    # package versions (so unpinned torch keeps a stable SHA -- not a lockfile).
+    #   schema       - recipe version; bump to deliberately invalidate ALL envs
+    #                  when the build recipe changes in a way no field captures.
+    #   aws_ofi_nccl - included ONLY when the plugin is actually built (derecho),
+    #                  so bumping its default never invalidates default/casper.
+    # printf with NO trailing newline: the bytes hashed here are byte-for-byte the
+    # bytes create_env.sh writes to credit-env.manifest, so the file always
+    # re-hashes to the SHA in the dir name (a free integrity check).
+    __CE_MANIFEST="$(printf '%s' \
+"schema=1
+backend=${CREDIT_BACKEND}
+host=${TARGET_HOST}
+python=${CREDIT_PYTHON_VERSION}
+torch=${CREDIT_TORCH_VERSION}
+cuda=${CREDIT_CUDA_VERSION}
+torch_spec=${__CE_TORCH_SPEC}
+pip_extra_url=${PIP_EXTRA_URL}
+pip_target=${PIP_TARGET_SPEC}
+aws_ofi_nccl=$([ "${NEEDS_OFI_PLUGIN}" -eq 1 ] && printf '%s' "${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}")
+ofi_plugin=${NEEDS_OFI_PLUGIN}")"
 
-    # Give the uv env its own prefix so a uv build and a conda build can coexist
-    # and the per-backend existence tests never cross-detect one another.
-    [ "${CREDIT_BACKEND}" = "uv" ] && ENV_NAME="${ENV_NAME}-uv"
+    # Name = <backend>-credit-env[-<host>]-<short-sha>.  backend leads (covers
+    # conda AND uv explicitly, replacing the old -uv suffix / bare-conda
+    # asymmetry); the host segment appears only for non-default hosts; python +
+    # everything else live in the manifest + SHA, not the name.  8 hex chars:
+    # inputs are config-derived (non-adversarial) and the manifest-match guard in
+    # config_env.sh is the backstop, so collision risk is negligible.
+    __CE_SHA="$(printf '%s' "${__CE_MANIFEST}" | __ce_sha | cut -c1-8)"
+    ENV_NAME="${CREDIT_BACKEND}-credit-env"
+    [ "${TARGET_HOST}" != "default" ] && ENV_NAME="${ENV_NAME}-${TARGET_HOST}"
+    ENV_NAME="${ENV_NAME}-${__CE_SHA}"
 
     ENV_DIR="${SCRIPTDIR}/${ENV_NAME}"
+}
+
+#----------------------------------------------------------------------------
+# Portable SHA-256 of stdin -> bare lowercase hex digest on stdout.
+#
+# Used by __ce_host_config to hash the config manifest at config-resolution time
+# -- BEFORE the env is built and (on the 'default' host) potentially before any
+# module puts a Python on PATH.  So the hasher MUST NOT depend on the very
+# interpreter these scripts exist to provision: try the coreutils/openssl
+# binaries present on bare login nodes + macOS + Linux runners first, and keep
+# `python3 -c hashlib` strictly as a last resort.  Each tool's output is
+# normalized to just the digest:
+#   sha256sum / shasum -a 256 -> "<hash>  -"            (take field 1)
+#   openssl dgst -sha256      -> "(stdin)= <hash>"  or
+#                                "SHA2-256(stdin)= <hash>" (openssl 3) (take last)
+# bash + zsh safe (no associative arrays, no word-splitting reliance).
+__ce_sha() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d' ' -f1
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 | awk '{print $NF}'
+    else
+        python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+    fi
 }
 
 #----------------------------------------------------------------------------
@@ -156,8 +214,8 @@ __ce_host_config() {
 __ce_host_config_cleanup() {
     unset ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
           __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
-          __CE_WANT_CUDA __CE_DEFAULT_CUDA __CE_CUDA_VER 2>/dev/null
-    unset -f __ce_host_config 2>/dev/null
+          __CE_WANT_CUDA __CE_DEFAULT_CUDA __CE_CUDA_VER __CE_MANIFEST __CE_SHA 2>/dev/null
+    unset -f __ce_host_config __ce_sha 2>/dev/null
     # Clean up the default_versions.sh state we sourced in (defensive: it may be
     # absent if sourcing failed).  Self-unsets the CREDIT_DEFAULT_* constants.
     command -v __ce_default_versions_cleanup >/dev/null 2>&1 && __ce_default_versions_cleanup

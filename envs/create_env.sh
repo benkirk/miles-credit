@@ -167,6 +167,17 @@ python "$@" || {
 }
 
 #-------------------------------------------------------
+# Record the env's identity: write the EXACT manifest string that __ce_host_config
+# hashed into ENV_DIR's name (recomputed here, identical by construction).  It is
+# byte-for-byte what was hashed, so re-hashing the file reproduces the dir's SHA
+# (integrity), and config_env.sh's activate-path guard compares against it.  Only
+# after the health check passes, so an incomplete build never leaves a manifest.
+printf '%s' "${__CE_MANIFEST}" > "${ENV_DIR}/credit-env.manifest" || {
+    echo "create_env.sh: failed to write ${ENV_DIR}/credit-env.manifest." >&2
+    exit 1
+}
+
+#-------------------------------------------------------
 # report success
 echo
 if [ "${CREDIT_BACKEND}" = "uv" ]; then

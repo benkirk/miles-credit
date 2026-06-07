@@ -54,7 +54,8 @@ __ce_usage() {
     cat <<USAGE
 Usage: [source] config_env.sh [--conda | --uv] [--python-version X.Y]
                               [--torch-version X.Y.Z] [--cuda-version X.Y]
-                              [--verbose] [--rebuild] [--help]
+                              [--verbose] [--rebuild]
+                              [--print-env-dir] [--list] [--help]
 
   --conda         Use conda for packaging (the default backend on every host).
                   Provided for symmetry with --uv so the backend can be pinned
@@ -66,10 +67,10 @@ Usage: [source] config_env.sh [--conda | --uv] [--python-version X.Y]
                   not bootstrapped for you.
   --python-version X.Y
                   Python version to build the environment with
-                  (default ${CREDIT_DEFAULT_PYTHON_VERSION}).
-                  Encoded into the env prefix (e.g. credit-env-py3.12) so
-                  multiple versions coexist.  Accepts '--python-version 3.12'
-                  or '--python-version=3.12'.
+                  (default ${CREDIT_DEFAULT_PYTHON_VERSION}).  Folded into the
+                  env's config hash (so builds with different Python versions get
+                  distinct SHA-named prefixes and coexist).  Accepts
+                  '--python-version 3.12' or '--python-version=3.12'.
   --torch-version X.Y.Z
                   torch version to pin on the pip line for the CUDA-enabled
                   hosts (default ${CREDIT_DEFAULT_TORCH_VERSION}).  Combined with
@@ -85,8 +86,48 @@ Usage: [source] config_env.sh [--conda | --uv] [--python-version X.Y]
   --rebuild, -r   Rebuild the environment even if it already exists.
                   The existing env is moved aside and removed in the
                   background, then a fresh env is built.
+  --print-env-dir Resolve and print the (SHA-named) env directory for the given
+                  flags, then stop -- no build, no activation.  The prefix is a
+                  content hash, so callers (CI, PBS scripts) ask the script for
+                  the path rather than predicting it.
+  --list          List the built CREDIT envs under ${SCRIPTDIR##*/}/ with their
+                  config (backend/host/python/torch/cuda), read from each env's
+                  credit-env.manifest, then stop.
   --help, -h      Show this help and stop.
 USAGE
+}
+
+#----------------------------------------------------------------------------
+# Inventory the built CREDIT envs from their on-disk manifests -- the "status
+# regardless of CLI arguments" capability: it reads each env's credit-env.manifest
+# rather than re-deriving anything from flags.  Needs no backend/modules.
+__ce_list() {
+    # zsh aborts on an unmatched glob (nomatch is on by default); disable it
+    # locally so an empty envs/ dir is handled by the per-iteration guard below.
+    # bash never reaches this line (the guard is false), so its lack of `setopt`
+    # is irrelevant.
+    [ -n "${ZSH_VERSION}" ] && setopt local_options no_nomatch 2>/dev/null
+
+    __ce_list_any=0
+    printf '%-40s %-7s %-8s %-7s %-9s %s\n' DIR BACKEND HOST PYTHON TORCH CUDA
+    for __ce_d in "${SCRIPTDIR}"/*-credit-env-*/; do
+        [ -d "${__ce_d}" ] || continue                 # literal pattern => no envs
+        __ce_m="${__ce_d}credit-env.manifest"
+        [ -f "${__ce_m}" ] || continue                 # skip half-built / foreign
+        __ce_list_any=1
+        # grep matches a final line even without a trailing newline (the manifest
+        # has none); cut -f2- keeps values that contain '='.
+        __ce_b="$(grep  '^backend=' "${__ce_m}" | cut -d= -f2-)"
+        __ce_h="$(grep  '^host='    "${__ce_m}" | cut -d= -f2-)"
+        __ce_py="$(grep '^python='  "${__ce_m}" | cut -d= -f2-)"
+        __ce_t="$(grep  '^torch='   "${__ce_m}" | cut -d= -f2-)"
+        __ce_c="$(grep  '^cuda='    "${__ce_m}" | cut -d= -f2-)"
+        printf '%-40s %-7s %-8s %-7s %-9s %s\n' \
+            "$(basename "${__ce_d%/}")" \
+            "${__ce_b:--}" "${__ce_h:--}" "${__ce_py:--}" "${__ce_t:--}" "${__ce_c:--}"
+    done
+    [ "${__ce_list_any}" -eq 1 ] || echo "(no built CREDIT environments found under ${SCRIPTDIR})"
+    unset __ce_d __ce_m __ce_b __ce_h __ce_py __ce_t __ce_c __ce_list_any
 }
 
 #----------------------------------------------------------------------------
@@ -115,6 +156,8 @@ __ce_parse_args() {
     CREDIT_TORCH_VERSION=""          # empty = use default_versions.sh default
     CREDIT_CUDA_VERSION=""           # empty = use host/global default
     __ce_show_help=0
+    __ce_print_dir=0          # --print-env-dir: resolve ENV_DIR and stop
+    __ce_list=0               # --list: inventory built envs from their manifests
     __ce_bad_arg=""
     __ce_expect_val=""        # name of the option whose value the NEXT token is
     for __ce_arg in "$@"; do
@@ -143,6 +186,8 @@ __ce_parse_args() {
             --cuda-version=*)     CREDIT_CUDA_VERSION="${__ce_arg#*=}" ;;
             --verbose|-v)         CREDIT_VERBOSE=1 ;;
             --rebuild|-r)         REBUILD=1 ;;
+            --print-env-dir)      __ce_print_dir=1 ;;
+            --list)               __ce_list=1 ;;
             --help|-h)            __ce_show_help=1 ;;
             "")                   : ;;
             *)                    __ce_bad_arg="${__ce_arg}" ;;
@@ -240,6 +285,28 @@ __ce_maybe_rebuild() {
 }
 
 #----------------------------------------------------------------------------
+# Integrity/identity guard before activation.  ENV_DIR is expected to exist here
+# (just built, or pre-existing).  Its credit-env.manifest must be byte-for-byte
+# the string __ce_host_config hashed into the dir name, so re-checking it
+# confirms the env on disk really is the requested config.  A missing manifest
+# (interrupted build) or a mismatch (astronomically unlikely hash collision, or
+# a stale env) is fatal -- fail loudly with a --rebuild hint rather than activate
+# the wrong / half-built environment.  Returns 1 on mismatch.
+__ce_check_manifest() {
+    [ -d "${ENV_DIR}" ] || return 0   # nothing on disk -> activate step reports it
+    if [ ! -f "${ENV_DIR}/credit-env.manifest" ]; then
+        echo "config_env.sh: ${ENV_DIR} has no credit-env.manifest" >&2
+        echo "                (interrupted build?); re-run with --rebuild." >&2
+        return 1
+    fi
+    printf '%s' "${__CE_MANIFEST}" | cmp -s - "${ENV_DIR}/credit-env.manifest" || {
+        echo "config_env.sh: ${ENV_DIR} does not match the requested config" >&2
+        echo "                (stale env or hash collision); re-run with --rebuild." >&2
+        return 1
+    }
+}
+
+#----------------------------------------------------------------------------
 # Activate the environment if it already exists.  Returns 0 (activated) so the
 # caller can short-circuit, or 1 if there is nothing to activate.
 __ce_activate_if_exists() {
@@ -278,10 +345,10 @@ __ce_source_runtime_hooks() {
 __ce_cleanup() {
     unset CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
           TARGET_HOST CONDA_ROOT \
-          __ce_show_help __ce_bad_arg __ce_arg __ce_expect_val __ce_status 2>/dev/null
-    unset -f __ce_usage run_quiet __ce_parse_args __ce_setup_modules \
+          __ce_show_help __ce_print_dir __ce_list __ce_bad_arg __ce_arg __ce_expect_val __ce_status 2>/dev/null
+    unset -f __ce_usage __ce_list run_quiet __ce_parse_args __ce_setup_modules \
              __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
-             __ce_activate_if_exists __ce_source_runtime_hooks __ce_run 2>/dev/null
+             __ce_check_manifest __ce_activate_if_exists __ce_source_runtime_hooks __ce_run 2>/dev/null
     # Clean up the host_config.sh state we sourced in (defensive: it may be
     # absent if sourcing failed).  Self-unsets __ce_host_config[_cleanup].
     command -v __ce_host_config_cleanup >/dev/null 2>&1 && __ce_host_config_cleanup
@@ -306,9 +373,23 @@ __ce_run() {
         return 2
     fi
 
+    # --list reads on-disk manifests only; no host policy / modules / backend.
+    if [ "${__ce_list}" -eq 1 ]; then
+        __ce_list
+        return 2
+    fi
+
     TARGET_HOST="${NCAR_HOST:-default}"
 
     __ce_host_config
+
+    # --print-env-dir: emit the resolved (SHA-named) prefix and stop.  Needs host
+    # config for the hash, but no modules/backend/build/activate.
+    if [ "${__ce_print_dir}" -eq 1 ]; then
+        echo "${ENV_DIR}"
+        return 2
+    fi
+
     __ce_setup_modules
 
     __ce_ensure_backend || return 1
@@ -330,6 +411,8 @@ __ce_run() {
                 return 1
             }
     fi
+
+    __ce_check_manifest || return 1
 
     __ce_activate_if_exists || {
         echo "config_env.sh: env expected after build but not activatable: ${ENV_DIR}" >&2
