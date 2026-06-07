@@ -120,9 +120,14 @@ runs:
         set -e
         printf '%s\n' "$out"
         [ "$rc" -eq 0 ] || { echo "FAIL: re-run rc=$rc"; exit 1; }
-        printf '%s\n' "$out" | grep -q 'Activating' \
+        # grep a here-string, NOT `printf "$out" | grep -q`: with GitHub's
+        # `shell: bash` (-o pipefail), grep -q closes the pipe on first match and
+        # printf dies with SIGPIPE/"write error: Broken pipe" on a large $out ->
+        # pipefail makes the matching pipeline report FAILURE. The here-string
+        # has no pipe, so it cannot false-negative.
+        grep -q 'Activating' <<<"$out" \
           || { echo "FAIL: expected 'Activating' (activate short-circuit)"; exit 1; }
-        if printf '%s\n' "$out" | grep -q 'successfully installed'; then
+        if grep -q 'successfully installed' <<<"$out"; then
           echo "FAIL: rebuilt instead of activating an existing env"; exit 1
         fi
         echo "OK: idempotent activate"
@@ -162,7 +167,11 @@ runs:
         set -e
         printf '%s\n' "$out"
         [ "$rc" -eq 0 ] || { echo "FAIL: rebuild rc=$rc"; exit 1; }
-        printf '%s\n' "$out" | grep -q 'Rebuild requested' \
+        # here-string, not `printf | grep -q`: the rebuild $out is large (full
+        # conda create log) and 'Rebuild requested' matches at the top, so the
+        # piped form SIGPIPEs printf and pipefail reports a false FAIL. See the
+        # idempotent-activate step for the full rationale.
+        grep -q 'Rebuild requested' <<<"$out" \
           || { echo "FAIL: expected 'Rebuild requested'"; exit 1; }
         test -d "envs/$CE_ENV" || { echo "FAIL: env missing after rebuild"; exit 1; }
         echo "OK: rebuild"
