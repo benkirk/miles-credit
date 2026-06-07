@@ -39,6 +39,7 @@ CREDIT_VERBOSE="${CREDIT_VERBOSE:-0}"
 CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION:-${CREDIT_DEFAULT_PYTHON_VERSION}}"  # versions_config.sh
 CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION:-}"
 CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION:-}"
+CREDIT_VENV_PYTHON="${CREDIT_VENV_PYTHON:-python3}"   # --venv interpreter (parent-resolved)
 TARGET_HOST="${NCAR_HOST:-default}"
 __ce_host_config
 
@@ -46,9 +47,9 @@ __ce_host_config
 # PATH binary -- and it is NOT inherited by this EXECUTED (non-sourced) child,
 # even though the parent already ran it.  conda is already on PATH (the parent
 # loaded its module, inherited here), so re-source conda.sh in THIS process to
-# make `conda activate` work below.  (The uv path activates a venv FILE we are
-# about to create, so it has no such inheritance issue.)
-if [ "${CREDIT_BACKEND}" != "uv" ]; then
+# make `conda activate` work below.  (The uv and venv paths activate a venv FILE
+# we are about to create, so they have no such inheritance issue.)
+if [ "${CREDIT_BACKEND}" = "conda" ]; then
     CONDA_ROOT=$(conda info --base 2>/dev/null)
     if [ -n "${CONDA_ROOT}" ] && [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
         source "${CONDA_ROOT}/etc/profile.d/conda.sh"
@@ -60,36 +61,53 @@ fi
 # create a minimal isolated environment with a controlled Python (the default
 # lives in versions_config.sh; set by --python-version, passed in as
 # CREDIT_PYTHON_VERSION)
-if [ "${CREDIT_BACKEND}" = "uv" ]; then
-    # Force a uv-managed standalone CPython (--managed-python) so the venv
-    # never adopts an interpreter the caller's shell merely happens to
-    # expose -- e.g. an active conda env (CONDA_PREFIX) or a system
-    # python3.11 on PATH -- whose lifecycle we do not control.  Without it,
-    # uv symlinks the venv's python at that external interpreter, which then
-    # dangles if it is later rebuilt or removed (breaking the uv env and the
-    # conda/uv "coexistence" guarantee).
-    uv venv --managed-python --python "${CREDIT_PYTHON_VERSION}" "${ENV_DIR}" || {
-        echo "create_env.sh: 'uv venv' failed." >&2
-        exit 1
-    }
-    source "${ENV_DIR}/bin/activate" || {
-        echo "create_env.sh: activating uv venv '${ENV_DIR}' failed." >&2
-        exit 1
-    }
-else
-    conda create \
-          --yes \
-          --prefix "${ENV_DIR}" \
-          python="${CREDIT_PYTHON_VERSION}" || {
-        echo "create_env.sh: 'conda create' failed." >&2
-        exit 1
-    }
+case "${CREDIT_BACKEND}" in
+    uv)
+        # Force a uv-managed standalone CPython (--managed-python) so the venv
+        # never adopts an interpreter the caller's shell merely happens to
+        # expose -- e.g. an active conda env (CONDA_PREFIX) or a system
+        # python3.11 on PATH -- whose lifecycle we do not control.  Without it,
+        # uv symlinks the venv's python at that external interpreter, which then
+        # dangles if it is later rebuilt or removed (breaking the uv env and the
+        # conda/uv "coexistence" guarantee).
+        uv venv --managed-python --python "${CREDIT_PYTHON_VERSION}" "${ENV_DIR}" || {
+            echo "create_env.sh: 'uv venv' failed." >&2
+            exit 1
+        }
+        source "${ENV_DIR}/bin/activate" || {
+            echo "create_env.sh: activating uv venv '${ENV_DIR}' failed." >&2
+            exit 1
+        }
+        ;;
+    venv)
+        # Plain stdlib venv against the PATH interpreter the parent resolved and
+        # validated (CREDIT_VENV_PYTHON; its version == CREDIT_PYTHON_VERSION).
+        # Unlike uv we deliberately ADOPT that interpreter -- that is the point
+        # of this backend (independent of conda and uv).
+        "${CREDIT_VENV_PYTHON}" -m venv "${ENV_DIR}" || {
+            echo "create_env.sh: '${CREDIT_VENV_PYTHON} -m venv' failed." >&2
+            exit 1
+        }
+        source "${ENV_DIR}/bin/activate" || {
+            echo "create_env.sh: activating venv '${ENV_DIR}' failed." >&2
+            exit 1
+        }
+        ;;
+    conda)
+        conda create \
+              --yes \
+              --prefix "${ENV_DIR}" \
+              python="${CREDIT_PYTHON_VERSION}" || {
+            echo "create_env.sh: 'conda create' failed." >&2
+            exit 1
+        }
 
-    conda activate "${ENV_DIR}" || {
-        echo "create_env.sh: 'conda activate ${ENV_DIR}' failed." >&2
-        exit 1
-    }
-fi
+        conda activate "${ENV_DIR}" || {
+            echo "create_env.sh: 'conda activate ${ENV_DIR}' failed." >&2
+            exit 1
+        }
+        ;;
+esac
 
 #-------------------------------------------------------
 # install the Python stack, forcing a source build of mpi4py with the host
@@ -98,7 +116,8 @@ fi
 # word-splitting -- and the extra-index URL is appended as two explicit
 # args only when set.  uv has its OWN no-binary flag; it does NOT honor
 # pip's PIP_NO_BINARY.  Fail loudly: a failed install must NOT fall through
-# to "success".
+# to "success".  conda and venv both drive the now-active env's plain `pip`
+# (PIP_NO_BINARY forces the mpi4py source build); only uv differs.
 if [ "${CREDIT_BACKEND}" = "uv" ]; then
     set -- uv pip install --no-binary mpi4py -e "${PIP_TARGET_SPEC}"
 else
@@ -180,10 +199,17 @@ printf '%s' "${__CE_MANIFEST}" > "${ENV_DIR}/credit-env.manifest" || {
 #-------------------------------------------------------
 # report success
 echo
-if [ "${CREDIT_BACKEND}" = "uv" ]; then
-    echo "\"${ENV_NAME}\" uv environment for ${TARGET_HOST} successfully installed into ${VIRTUAL_ENV}"
-    echo "use \"source ${ENV_DIR}/bin/activate\" to activate"
-else
-    echo "\"${ENV_NAME}\" conda environment for ${TARGET_HOST} successfully installed into ${CONDA_PREFIX}"
-    echo "use \"conda activate ${ENV_DIR}\" to activate"
-fi
+case "${CREDIT_BACKEND}" in
+    uv)
+        echo "\"${ENV_NAME}\" uv environment for ${TARGET_HOST} successfully installed into ${VIRTUAL_ENV}"
+        echo "use \"source ${ENV_DIR}/bin/activate\" to activate"
+        ;;
+    venv)
+        echo "\"${ENV_NAME}\" venv environment for ${TARGET_HOST} successfully installed into ${VIRTUAL_ENV}"
+        echo "use \"source ${ENV_DIR}/bin/activate\" to activate"
+        ;;
+    conda)
+        echo "\"${ENV_NAME}\" conda environment for ${TARGET_HOST} successfully installed into ${CONDA_PREFIX}"
+        echo "use \"conda activate ${ENV_DIR}\" to activate"
+        ;;
+esac

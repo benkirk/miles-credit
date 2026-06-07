@@ -20,7 +20,10 @@ inputs:
     description: "shell-under-test the script is parsed by: 'bash' or 'zsh'"
     default: 'bash'
   python-version:
-    description: "Python to build (threaded to --python-version; always encoded into the env prefix)"
+    description: >
+      Python to build (threaded to --python-version for conda/uv).  IGNORED for
+      the venv backend, which adopts the runner's python3; the resolved version
+      is always folded into the env's SHA prefix regardless of backend.
     default: '3.11'
   torch-version:
     description: "optional torch pin (--torch-version); empty => unpinned (pyproject resolves it)"
@@ -66,8 +69,14 @@ runs:
       shell: bash
       run: |
         ARGS=""
-        [ "${{ inputs.backend }}" = uv ] && ARGS="$ARGS --uv"
-        ARGS="$ARGS --python-version ${{ inputs.python-version }}"
+        case "${{ inputs.backend }}" in
+          uv)   ARGS="$ARGS --uv" ;;
+          venv) ARGS="$ARGS --venv" ;;
+        esac
+        # venv ADOPTS the runner's python3 (and FAILS if --python-version asks for
+        # a different one), so we must NOT pin a version for it; conda/uv build the
+        # requested version and get the pin.
+        [ "${{ inputs.backend }}" = venv ] || ARGS="$ARGS --python-version ${{ inputs.python-version }}"
         [ -n "${{ inputs.torch-version }}" ] && ARGS="$ARGS --torch-version ${{ inputs.torch-version }}"
         # 'disabled' sentinel => no --cuda-version (CPU/default). A real value is
         # forwarded (reserved for a future GPU runner leg).
@@ -77,8 +86,10 @@ runs:
         ENV_DIR=$(bash envs/config_env.sh $ARGS --print-env-dir) \
           || { echo "FAIL: --print-env-dir returned non-zero"; exit 1; }
         ENV=$(basename "$ENV_DIR")
-        MARKER=CONDA_PREFIX
-        [ "${{ inputs.backend }}" = uv ] && MARKER=VIRTUAL_ENV
+        case "${{ inputs.backend }}" in
+          uv|venv) MARKER=VIRTUAL_ENV ;;
+          *)       MARKER=CONDA_PREFIX ;;
+        esac
         { echo "CE_ARGS=$ARGS"; echo "CE_ENV=$ENV"; echo "CE_MARKER=$MARKER"; } >> "$GITHUB_ENV"
 
     - name: Set up conda (Miniforge)
@@ -155,7 +166,7 @@ runs:
           */envs/$CE_ENV) echo "OK: $CE_MARKER=$marker_val" ;;
           *) echo "FAIL: $CE_MARKER not the env: '$marker_val'"; exit 1 ;;
         esac
-        for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_list __ce_check_manifest run_quiet; do
+        for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_list __ce_check_manifest __ce_ensure_backend __ce_resolve_venv_python run_quiet; do
           if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
         done
         echo "OK: source-activate leaves no residue"
@@ -189,10 +200,12 @@ runs:
         # does not assert a specific one (the script stays unopinionated), so we
         # assert here.  Strip any +cuXXX local tag before comparing.
         P="$GITHUB_WORKSPACE/envs/$CE_ENV"
-        if [ "${{ inputs.backend }}" = uv ]; then
-          in_env() { "$P/bin/python" "$@"; }
-        else
+        # uv and venv expose the interpreter at $P/bin/python; only conda needs
+        # `conda run`.
+        if [ "${{ inputs.backend }}" = conda ]; then
           in_env() { conda run --no-capture-output -p "$P" python "$@"; }
+        else
+          in_env() { "$P/bin/python" "$@"; }
         fi
         want='${{ inputs.torch-version }}'
         in_env -c "import torch,sys; got=torch.__version__.split('+')[0]; \
@@ -210,13 +223,17 @@ runs:
         # minimal).  conda has `conda run` + pip; a uv venv has neither, so we
         # target its python via `uv pip --python` and invoke the venv's bin/.
         P="$GITHUB_WORKSPACE/envs/$CE_ENV"
-        if [ "${{ inputs.backend }}" = uv ]; then
-          uv pip install --python "$P/bin/python" pipdeptree
-          in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; }
-        else
-          conda run -p "$P" pip install pipdeptree
-          in_env() { conda run --no-capture-output -p "$P" "$@"; }
-        fi
+        case "${{ inputs.backend }}" in
+          uv)
+            uv pip install --python "$P/bin/python" pipdeptree
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          venv)
+            "$P/bin/pip" install pipdeptree
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          conda)
+            conda run -p "$P" pip install pipdeptree
+            in_env() { conda run --no-capture-output -p "$P" "$@"; } ;;
+        esac
         echo "::group::pipdeptree --depth 3"; in_env pipdeptree --depth 3; echo "::endgroup::"
 
     - name: "Test (pytest) in the built env"
@@ -229,11 +246,15 @@ runs:
         SKIP_HRRR_REMOTE: "1"
       run: |
         P="$GITHUB_WORKSPACE/envs/$CE_ENV"
-        if [ "${{ inputs.backend }}" = uv ]; then
-          uv pip install --python "$P/bin/python" pytest
-          in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; }
-        else
-          conda run -p "$P" pip install pytest
-          in_env() { conda run --no-capture-output -p "$P" "$@"; }
-        fi
+        case "${{ inputs.backend }}" in
+          uv)
+            uv pip install --python "$P/bin/python" pytest
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          venv)
+            "$P/bin/pip" install pytest
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          conda)
+            conda run -p "$P" pip install pytest
+            in_env() { conda run --no-capture-output -p "$P" "$@"; } ;;
+        esac
         echo "::group::pytest tests/"; in_env pytest tests/; echo "::endgroup::"

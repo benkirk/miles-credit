@@ -43,6 +43,10 @@ jobs:
         # strip trailing zeros. Python floor is 3.11 (pyproject requires-python).
         python: ['3.11', '3.12', '3.13']
         torch: ['2.10.0', '2.11.0']
+        # Only conda/uv here: they PROVISION the requested python, so the sweep is
+        # meaningful.  venv ADOPTS the runner's python3 and hard-fails a mismatched
+        # --python-version, so a forced python sweep cannot apply to it; the venv
+        # backend is exercised in ci-config-env.yml's full-build matrix instead.
         backend: [conda, uv]
     steps:
       - name: Checkout code
