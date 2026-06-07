@@ -26,6 +26,7 @@ on:
       - 'envs/**'
       - 'pyproject.toml'
       - '.github/workflows/ci-config-env.yml'
+      - '.github/actions/build-credit-env/**'
   workflow_dispatch:
 
 permissions:
