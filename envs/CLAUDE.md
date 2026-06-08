@@ -9,7 +9,7 @@ behavior changes.
 
 | File | Role |
 | --- | --- |
-| `config_env.sh` | Dual-mode (source **or** execute) entry point. `bash`+`zsh`, conda (default) or `uv` (`--uv`), idempotent. Does modules, env vars, **activation**, and orchestration in the caller's shell. Shells out to `create_env.sh` to build. |
+| `config_env.sh` | Dual-mode (source **or** execute) entry point. `bash`+`zsh`, conda (default), `uv` (`--uv`), or a plain `python -m venv` (`--venv`), idempotent. Does modules, env vars, **activation**, and orchestration in the caller's shell. Shells out to `create_env.sh` to build. |
 | `versions_config.sh` | **Single source of truth for BOTH the DEFAULT versions** (`CREDIT_DEFAULT_{BACKEND,PYTHON_VERSION,TORCH_VERSION,CUDA_VERSION,AWS_OFI_NCCL_VERSION}`) **and the per-host policy** (`__ce_host_config`, `__ce_sha`). SOURCED (never executed) by `config_env.sh` + `create_env.sh` (both derive identical `ENV_DIR`/pip-target/flags) and by `build-aws-ofi-nccl-plugin.sh` (just for the AWS plugin default). Sourcing only assigns constants + defines functions (nothing runs → safe under `set -eu`). Owns one cleanup, `__ce_host_config_cleanup` (unsets the host-policy scalars AND the `CREDIT_DEFAULT_*` constants). Bump a default = one-line edit here. |
 | `create_env.sh` | The build recipe (conda create / `uv venv`, pip install, OFI plugin, probe, then writes `<ENV_DIR>/credit-env.manifest`). **EXECUTE-ONLY**: `config_env.sh` runs it as a SUBPROCESS when the env is absent, so it pollutes nothing. Mirrors `build-aws-ofi-nccl-plugin.sh`. |
 | `build-aws-ofi-nccl-plugin.sh` | derecho-only. Builds the AWS OFI NCCL plugin + (if no system hwloc) a standalone hwloc into `<env>/dependencies/`. Owns **all** hwloc logic. Invoked by `create_env.sh`. |
@@ -122,8 +122,32 @@ script is sourced into interactive shells and PBS run scripts):
   `--managed-python` so it never adopts whatever `python<X.Y>` the caller's shell
   exposes (an active conda env, a system python). Without it the venv symlinks an
   external interpreter and dangles when that is rebuilt/removed. Don't drop this flag.
-- `mpi4py` is always a source build: conda path via `PIP_NO_BINARY=mpi4py`; uv
-  path via uv's own `--no-binary mpi4py` (uv ignores `PIP_NO_BINARY`).
+- **`--venv` is the opposite of uv: it deliberately ADOPTS the PATH `python3`.**
+  It is `python -m venv`, independent of conda and uv, and does **no module
+  manipulation** on any host (`__ce_setup_modules` skips the backend-module load
+  for it). Because it cannot *choose* the interpreter it can only *check* it:
+  `__ce_resolve_venv_python` (in `config_env.sh`) finds `python3`/`python`,
+  enforces `>= CREDIT_MIN_PYTHON_VERSION` (a constant in `versions_config.sh`,
+  kept in sync with pyproject's `requires-python`), and treats `--python-version`
+  as an **assertion** — a mismatch with the PATH python is fatal; omitting it
+  *adopts* the detected version. This resolution MUST run **before
+  `__ce_host_config`** (it sets `CREDIT_PYTHON_VERSION`, which feeds the
+  manifest/SHA and `--print-env-dir`), so it is a dedicated early step in
+  `__ce_run`, not folded into `__ce_ensure_backend`. The resolved interpreter is
+  threaded to the build subprocess as `CREDIT_VENV_PYTHON` (a `CREDIT_*` input,
+  so parent and child use the *exact* same python). `__ce_py_explicit` tracks
+  whether `--python-version` was actually passed (the default 3.11 is set
+  unconditionally, so adopt-on-omit needs this flag to avoid a spurious mismatch).
+- **Backend dispatch is ONE case, not per-backend helpers.** `__ce_ensure_backend`
+  is a single `case "${CREDIT_BACKEND}"` with a `conda`/`uv`/`venv` arm (the old
+  `__ce_ensure_uv`/`__ce_ensure_conda` helpers were removed). `__ce_activate_if_exists`
+  is likewise a `case` where `uv|venv)` share the `source <env>/bin/activate` arm
+  (both are standard venvs) and `conda)` uses `conda activate`; `create_env.sh`
+  mirrors this with `case` arms for creation and the success message. When adding
+  a backend, add an arm in each — and remember the cleanup/CI leak lists.
+- `mpi4py` is always a source build: conda **and venv** via `PIP_NO_BINARY=mpi4py`
+  (both drive the active env's plain `pip`); uv via uv's own `--no-binary mpi4py`
+  (uv ignores `PIP_NO_BINARY`).
 - **torch/CUDA is pinned at install time, not in `pyproject.toml`.** The CUDA
   hosts install the single `.[distributed]` extra (just `mpi4py`); the torch
   build is appended to the pip line as `__CE_TORCH_SPEC` (`torch==<ver>+cu<tag>`)
@@ -169,21 +193,28 @@ script is sourced into interactive shells and PBS run scripts):
 
 - Syntax: `bash -n` + `zsh -n` on `config_env.sh` and `versions_config.sh`;
   `bash -n envs/create_env.sh` (execute-only → bash only).
-- Fast contract (no build): `--help`, `--uv --help`, `--bogus` (maps to rc 0),
-  and sourced `--help` leaving no `__ce_*`/`CREDIT_*`/host-policy/`CREDIT_DEFAULT_*`
-  residue (incl. `__ce_host_config_cleanup`, `__ce_sha`, `__ce_list`,
-  `__ce_check_manifest`, `__CE_MANIFEST`, `__CE_SHA`) under bash & zsh.
+- Fast contract (no build): `--help`, `--uv --help`, `--venv --help`, `--bogus`
+  (maps to rc 0), and sourced `--help` leaving no
+  `__ce_*`/`CREDIT_*`/host-policy/`CREDIT_DEFAULT_*` residue (incl.
+  `__ce_host_config_cleanup`, `__ce_sha`, `__ce_list`, `__ce_check_manifest`,
+  `__ce_resolve_venv_python`, `__CE_MANIFEST`, `__CE_SHA`, `CREDIT_VENV_PYTHON`,
+  `__ce_py_explicit`, `CREDIT_MIN_PYTHON_VERSION`) under bash & zsh.
+- venv resolution (no full build, needs a `python3` on PATH): `--venv
+  --print-env-dir` adopts the PATH python's `X.Y` into the SHA;
+  `--venv --python-version <matches>` gives the SAME SHA; `--venv --python-version
+  <differs>` and a `python3 < CREDIT_MIN_PYTHON_VERSION` BOTH fail loudly (rc 1).
 - Content-addressing (no build): `--print-env-dir` is deterministic and matches
   across bash/zsh and across the three `__ce_sha` backends; same config via
   `--python-version=3.12` vs `--python-version 3.12` → identical SHA; `--uv` /
-  `--torch-version` / `--cuda-version` each shift the SHA. `--list` reads
+  `--venv` / `--torch-version` / `--cuda-version` each shift the SHA. `--list` reads
   manifests and tolerates an empty `envs/` (zsh `nomatch` is disabled locally).
   The integrity invariant: `printf '%s' "$__CE_MANIFEST" | __ce_sha | cut -c1-8`
   equals the suffix of `ENV_DIR` (= what `create_env.sh` writes to the manifest).
 - **HPC behavior is not covered by CI** — the heavy `casper`/`derecho` builds
   (CUDA wheels, NCCL, Cray libfabric, the OFI plugin) can't run on free runners.
-  Validate those **manually on a casper/derecho login node**, both backends, full
-  matrix: fresh build → idempotent activate → source+hooks+no-pollution →
+  Validate those **manually on a casper/derecho login node**, all backends
+  (conda/uv/venv), full matrix: fresh build → idempotent activate →
+  source+hooks+no-pollution →
   `--rebuild` → `pipdeptree`/`pytest`, plus (derecho) `ldd`/`readelf` that the
   plugin resolves `libhwloc.so.15` into `dependencies/hwloc-env/lib`.
 
@@ -203,13 +234,17 @@ script is sourced into interactive shells and PBS run scripts):
 - `ci-config-env.yml` triggers on PRs to `staging`/`main` touching `envs/**`,
   `pyproject.toml`, or the workflow; plus `workflow_dispatch`. Matrix:
   {ubuntu-x86_64, ubuntu-arm64, macos-arm64} × {bash, zsh}; `full-build` adds
-  × {conda, uv} and calls the action at defaults (py3.11, no torch pin, all legs
-  on) — behavior identical to before the extraction. The `contract` job stays
-  inline (it tests arg-parsing/pollution, not the build).
+  × {conda, uv, venv} and calls the action at defaults (py3.11, no torch pin, all
+  legs on). The `venv` leg is special-cased in the action: it does NOT pass
+  `--python-version` (venv would hard-fail a mismatch with the runner's `python3`)
+  and its in_env helpers use the venv's own `bin/python`+`bin/pip`. The `contract`
+  job stays inline (it tests arg-parsing/pollution, not the build).
 - `ci-matrix.yml` triggers on **any** PR to `main`/`staging` (no paths filter) +
   `workflow_dispatch`. Matrix: {3.11, 3.12, 3.13} × {2.10.0, 2.11.0} × {conda, uv}
   on linux-amd64/bash; `rebuild`+`introspect` off, pytest + verify-torch on. Each
-  leg passes `--torch-version` only → the CPU torch-pin `elif` arm.
+  leg passes `--torch-version` only → the CPU torch-pin `elif` arm. **venv is
+  excluded here on purpose** — a forced `--python-version` sweep is incompatible
+  with venv's adopt-or-match rule (it is covered by ci-config-env's full-build).
 - `matrix` is **not** allowed in a step's `shell:` field (and is invisible inside
   a composite action) — steps run under `shell: bash`/`inputs.shell` and invoke
   the shell-under-test inside the run block. Every `run:` in the composite action

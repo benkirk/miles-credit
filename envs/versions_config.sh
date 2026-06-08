@@ -35,6 +35,9 @@
 # subprocesses never clean up -- they pollute nothing).
 CREDIT_DEFAULT_BACKEND="conda"          # packaging backend when --uv is absent
 CREDIT_DEFAULT_PYTHON_VERSION="3.11"    # --python-version default
+CREDIT_MIN_PYTHON_VERSION="3.11"        # floor for the --venv backend (adopts the
+                                        # PATH python); keep in sync with
+                                        # pyproject.toml requires-python
 CREDIT_DEFAULT_TORCH_VERSION="2.10.0"   # --torch-version default (CUDA hosts)
 CREDIT_DEFAULT_CUDA_VERSION="12.6"      # global --cuda-version default; a host
                                         # may override it (see __ce_host_config,
@@ -228,7 +231,7 @@ __ce_host_config_cleanup() {
     unset ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
           __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
           __CE_WANT_CUDA __CE_DEFAULT_CUDA __CE_CUDA_VER __CE_MANIFEST __CE_SHA \
-          CREDIT_DEFAULT_BACKEND CREDIT_DEFAULT_PYTHON_VERSION \
+          CREDIT_DEFAULT_BACKEND CREDIT_DEFAULT_PYTHON_VERSION CREDIT_MIN_PYTHON_VERSION \
           CREDIT_DEFAULT_TORCH_VERSION CREDIT_DEFAULT_CUDA_VERSION \
           CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION 2>/dev/null
     unset -f __ce_host_config __ce_sha 2>/dev/null

@@ -92,6 +92,19 @@ jobs:
           printf '%s\n' "$out" | grep -q -- '--uv' || { echo "FAIL: no --uv in usage"; exit 1; }
           echo "OK: --uv --help"
 
+      - name: "--venv --help (execute under ${{ matrix.shell }})"
+        run: |
+          # --venv is parsed before any backend work; --help short-circuits BEFORE
+          # the python resolution, so this is a pure arg-parse check (no python3
+          # query).
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh --venv --help 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: --venv --help rc=$rc (want 0)"; exit 1; }
+          printf '%s\n' "$out" | grep -q -- '--venv' || { echo "FAIL: no --venv in usage"; exit 1; }
+          echo "OK: --venv --help"
+
       - name: "Bad argument (execute under ${{ matrix.shell }})"
         run: |
           # help/bad-arg map to status 2 -> the driver returns/exits 0.
@@ -155,18 +168,18 @@ jobs:
           # No helper FUNCTIONS may survive in the caller shell (config_env.sh,
           # plus the versions_config.sh it sources -> __ce_host_config[_cleanup]
           # and __ce_sha).
-          for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda run_quiet; do
+          for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_ensure_backend __ce_resolve_venv_python run_quiet; do
             if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
           done
           # No helper VARIABLES may survive (${VAR+set} is a set-test, bash & zsh).
           # Includes the CREDIT_*-namespaced inputs, the host-policy scalars, and
           # the CREDIT_DEFAULT_* constants -- all owned by versions_config.sh.
           for v in CONDA_ROOT CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
-                   TARGET_HOST __ce_status __ce_expect_val \
+                   CREDIT_VENV_PYTHON TARGET_HOST __ce_status __ce_expect_val __ce_py_explicit \
                    ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
                    __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
                    __CE_WANT_CUDA __CE_DEFAULT_CUDA \
-                   CREDIT_DEFAULT_BACKEND CREDIT_DEFAULT_PYTHON_VERSION CREDIT_DEFAULT_TORCH_VERSION \
+                   CREDIT_DEFAULT_BACKEND CREDIT_DEFAULT_PYTHON_VERSION CREDIT_MIN_PYTHON_VERSION CREDIT_DEFAULT_TORCH_VERSION \
                    CREDIT_DEFAULT_CUDA_VERSION CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION; do
             eval "probe=\${$v+set}"
             if [ "${probe:-}" = set ]; then echo "FAIL: leaked variable: $v"; exit 1; fi
@@ -198,7 +211,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         shell: [bash, zsh]
-        backend: [conda, uv]
+        backend: [conda, uv, venv]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

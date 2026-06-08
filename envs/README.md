@@ -1,4 +1,4 @@
-# Environment Installation (conda, or `uv` via `--uv`)
+# Environment Installation (conda, `uv` via `--uv`, or a plain venv via `--venv`)
 
 ## `config_env.sh`
 
@@ -34,10 +34,11 @@ what is built with `--list` (both read the on-disk manifest, not your flags).
 
 ### Supported hosts
 
-- **`default`** — any host with `conda` already on `PATH` (or `uv`, with
-  `--uv`). Creates a Python environment (3.11 by default; see
-  `--python-version`) and runs `pip install -e "."` from the repository root.
-  No modules are loaded and no host-specific extras are installed.
+- **`default`** — any host with `conda` already on `PATH` (or `uv`, with `--uv`;
+  or just a `python3 >= 3.11` on `PATH`, with `--venv`). Creates a Python
+  environment (3.11 by default; see `--python-version`) and runs `pip install -e
+  "."` from the repository root. No modules are loaded and no host-specific
+  extras are installed.
 
 - **`casper`** — loads `ncarenv/25.10`, `gcc/14.3.0`, and `conda`, then
   installs `.[distributed]` (the `mpi4py` extra) with `torch==2.10.0+cu126`
@@ -63,7 +64,8 @@ These work identically whether the script is sourced or executed:
 | Option            | Effect                                                                 |
 | ----------------- | ---------------------------------------------------------------------- |
 | `--uv`            | Use the [`uv`](https://docs.astral.sh/uv/) installer and a uv-managed venv instead of conda (see [below](#alternative-the-uv-backend---uv)). Supported on all hosts (`default`/`casper`/`derecho`). |
-| `--python-version X.Y` | Python version to build with (default `3.11`). Folded into the prefix's config hash, so different versions get distinct prefixes and coexist. Accepts `--python-version 3.12` or `--python-version=3.12`. |
+| `--venv`          | Use a plain `python -m venv` against the `python3` already on `PATH` — independent of conda and uv, no module manipulation (see [below](#alternative-the-venv-backend---venv)). The interpreter is *adopted*, so it must be `>= 3.11` and `--python-version` (if given) must match it. |
+| `--python-version X.Y` | Python version to build with (default `3.11`). Folded into the prefix's config hash, so different versions get distinct prefixes and coexist. Accepts `--python-version 3.12` or `--python-version=3.12`. Under `--venv` this *asserts* (rather than selects) the version. |
 | `--torch-version X.Y.Z` | Pin the torch version on the pip line. On a CUDA build (CUDA host or `--cuda-version`) it becomes `torch==<ver>+cu<tag>` (default `2.10.0`); on a plain CPU build it pins `torch==<ver>` from PyPI. Omitted → torch is left unpinned (CPU) or defaults to `2.10.0` (CUDA). Accepts the `=` form too. |
 | `--cuda-version X.Y` | CUDA build of torch, e.g. `12.6` → the `cu126` PyTorch wheels + matching `--extra-index-url`. Defaults per host (`casper` 12.6, `derecho` 12.9); on `default` it opts into a CUDA build (otherwise plain torch from PyPI). |
 | `--verbose`, `-v` | Show module/backend setup output (suppressed by default). Also echoes the assembled `pip install` command. |
@@ -114,6 +116,39 @@ source envs/config_env.sh --uv
 ./envs/config_env.sh --uv --rebuild
 ```
 
+### Alternative: the `venv` backend (`--venv`)
+
+The `--venv` flag uses the Python standard library's `python -m venv` against the
+**`python3` already on your `PATH`** — no conda, no uv, and **no module
+manipulation** on any host. Unlike conda/uv (which *provision* an interpreter),
+venv *adopts* the ambient one, so it can only **check** the version, not choose
+it:
+
+- The interpreter must be **`>= 3.11`** (`CREDIT_MIN_PYTHON_VERSION` in
+  `versions_config.sh`, matching `pyproject.toml`'s `requires-python`); an older
+  `python3` is a hard error.
+- **`--python-version` becomes an assertion.** Omit it to *adopt* whatever
+  `python3` resolves to; if you pass it, it must **match** that version exactly —
+  a mismatch fails loudly (venv cannot install a different one). To build with a
+  specific version, put that interpreter first on your `PATH` (e.g. `module load`
+  it, or a `pyenv`/`asdf` shim) and re-run.
+- The env gets its **own prefix** (`venv-credit-env[-<host>]-<sha>`; the
+  `backend` field of the manifest differs from conda/uv) so all three backends
+  coexist. The adopted version *is* folded into the SHA, so the prefix changes
+  when the ambient `python3` does.
+- `mpi4py` is forced to a source build via pip's `PIP_NO_BINARY=mpi4py` (the venv
+  uses plain `pip`, exactly like the conda backend). Activation is the standard
+  `source <prefix>/bin/activate` (sets `VIRTUAL_ENV`), like uv.
+
+```bash
+# build (first time) or activate a venv-backed env into your current shell
+# (adopts the python3 on PATH):
+source envs/config_env.sh --venv
+
+# assert a specific version is the one on PATH (fails if it is not):
+source envs/config_env.sh --venv --python-version 3.12
+```
+
 ## Examples
 
 Activate (or build, the first time) into your **current** shell — the normal
@@ -160,7 +195,9 @@ Linux arm64, and macOS arm64, each under **both `bash` and `zsh`**:
   handling, and the sourceable dual-mode + **no-shell-pollution** guarantee.
 - **full build**: a real `--rebuild`, then idempotent activate and
   source-activate, plus a post-install health check (`probe_installed_env.py`)
-  that imports `torch`/`credit` and reports the CUDA/NCCL state.
+  that imports `torch`/`credit` and reports the CUDA/NCCL state. Runs across all
+  three backends (`conda`/`uv`/`venv`); the venv leg adopts the runner's
+  `python3` (no `--python-version` pin).
 
 The heavy **full build** legs live in the reusable composite action
 [`.github/actions/build-credit-env`](../.github/actions/build-credit-env/action.yml),

@@ -3,7 +3,8 @@
 
 #----------------------------------------------------------------------------
 # Unified script to create and initialize a CREDIT Python environment
-# (conda by default, or uv via --uv) across systems.
+# (conda by default, uv via --uv, or a plain python -m venv via --venv) across
+# systems.
 #
 # This script is intended to be idempotent and both sourceable or runnable.
 #
@@ -52,7 +53,7 @@ source "${SCRIPTDIR}/versions_config.sh"
 #----------------------------------------------------------------------------
 __ce_usage() {
     cat <<USAGE
-Usage: [source] config_env.sh [--conda | --uv] [--python-version X.Y]
+Usage: [source] config_env.sh [--conda | --uv | --venv] [--python-version X.Y]
                               [--torch-version X.Y.Z] [--cuda-version X.Y]
                               [--verbose] [--rebuild]
                               [--print-env-dir] [--list] [--help]
@@ -65,12 +66,19 @@ Usage: [source] config_env.sh [--conda | --uv] [--python-version X.Y]
                   of conda.  Supported on all hosts (default/casper/derecho).
                   uv must already be on PATH (or available as a module); it is
                   not bootstrapped for you.
+  --venv          Use a plain 'python -m venv' against the python3 ALREADY on
+                  PATH -- independent of conda and uv, and no module manipulation
+                  on any host.  The interpreter is adopted, not provisioned, so
+                  it must be >= ${CREDIT_MIN_PYTHON_VERSION}; --python-version is
+                  then optional and, if given, must MATCH the version on PATH (a
+                  mismatch is a hard error -- venv cannot install a different one).
   --python-version X.Y
                   Python version to build the environment with
                   (default ${CREDIT_DEFAULT_PYTHON_VERSION}).  Folded into the
                   env's config hash (so builds with different Python versions get
                   distinct SHA-named prefixes and coexist).  Accepts
-                  '--python-version 3.12' or '--python-version=3.12'.
+                  '--python-version 3.12' or '--python-version=3.12'.  Under
+                  --venv this asserts (rather than selects) the version: see --venv.
   --torch-version X.Y.Z
                   torch version to pin on the pip line for the CUDA-enabled
                   hosts (default ${CREDIT_DEFAULT_TORCH_VERSION}).  Combined with
@@ -155,6 +163,8 @@ __ce_parse_args() {
     CREDIT_PYTHON_VERSION="${CREDIT_DEFAULT_PYTHON_VERSION}"  # versions_config.sh
     CREDIT_TORCH_VERSION=""          # empty = use versions_config.sh default
     CREDIT_CUDA_VERSION=""           # empty = use host/global default
+    CREDIT_VENV_PYTHON=""            # --venv: resolved interpreter (see __ce_resolve_venv_python)
+    __ce_py_explicit=0               # 1 once --python-version is seen (any form)
     __ce_show_help=0
     __ce_print_dir=0          # --print-env-dir: resolve ENV_DIR and stop
     __ce_list=0               # --list: inventory built envs from their manifests
@@ -167,7 +177,7 @@ __ce_parse_args() {
             case "${__ce_arg}" in
                 -*) __ce_bad_arg="--${__ce_expect_val} (missing value)" ;;
                 *)  case "${__ce_expect_val}" in
-                        python-version) CREDIT_PYTHON_VERSION="${__ce_arg}" ;;
+                        python-version) CREDIT_PYTHON_VERSION="${__ce_arg}"; __ce_py_explicit=1 ;;
                         torch-version)  CREDIT_TORCH_VERSION="${__ce_arg}" ;;
                         cuda-version)   CREDIT_CUDA_VERSION="${__ce_arg}" ;;
                     esac ;;
@@ -178,8 +188,9 @@ __ce_parse_args() {
         case "${__ce_arg}" in
             --conda)              CREDIT_BACKEND="conda" ;;
             --uv)                 CREDIT_BACKEND="uv" ;;
+            --venv)               CREDIT_BACKEND="venv" ;;
             --python-version)     __ce_expect_val="python-version" ;;
-            --python-version=*)   CREDIT_PYTHON_VERSION="${__ce_arg#*=}" ;;
+            --python-version=*)   CREDIT_PYTHON_VERSION="${__ce_arg#*=}"; __ce_py_explicit=1 ;;
             --torch-version)      __ce_expect_val="torch-version" ;;
             --torch-version=*)    CREDIT_TORCH_VERSION="${__ce_arg#*=}" ;;
             --cuda-version)       __ce_expect_val="cuda-version" ;;
@@ -202,6 +213,58 @@ __ce_parse_args() {
 }
 
 #----------------------------------------------------------------------------
+# Resolve (and validate) the interpreter for the --venv backend.  venv ADOPTS
+# the python3 already on PATH rather than provisioning one, so we can only check
+# it -- not choose it.  No-op for conda/uv.  Must run BEFORE __ce_host_config so
+# the detected major.minor feeds the manifest/SHA (and --print-env-dir).
+#   - find python3 (else python); read its major.minor
+#   - require >= CREDIT_MIN_PYTHON_VERSION (the pyproject floor)
+#   - if --python-version was given and differs -> hard error (cannot install it)
+#   - otherwise ADOPT the detected version into CREDIT_PYTHON_VERSION
+# Sets CREDIT_VENV_PYTHON (passed to create_env.sh so parent and child build with
+# the exact same interpreter).  Returns 1 on any failure.
+__ce_resolve_venv_python() {
+    [ "${CREDIT_BACKEND}" = "venv" ] || return 0
+
+    __ce_venv_py="$(command -v python3 || command -v python)"
+    [ -n "${__ce_venv_py}" ] || {
+        echo "config_env.sh: --venv needs a python3 (or python) on PATH; none found." >&2
+        unset __ce_venv_py
+        return 1
+    }
+    __ce_venv_ver="$("${__ce_venv_py}" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
+    case "${__ce_venv_ver}" in
+        [0-9]*.[0-9]*) : ;;
+        *) echo "config_env.sh: could not determine the python version of ${__ce_venv_py}." >&2
+           unset __ce_venv_py __ce_venv_ver; return 1 ;;
+    esac
+
+    # Integer major.minor compare against the floor (string compare is wrong:
+    # "3.9" > "3.11").  Inlined (no helper) -- bash & zsh safe.
+    __ce_have_maj="${__ce_venv_ver%%.*}"; __ce_have_min="${__ce_venv_ver#*.}"
+    __ce_min_maj="${CREDIT_MIN_PYTHON_VERSION%%.*}"; __ce_min_min="${CREDIT_MIN_PYTHON_VERSION#*.}"
+    if [ "${__ce_have_maj}" -lt "${__ce_min_maj}" ] || \
+       { [ "${__ce_have_maj}" -eq "${__ce_min_maj}" ] && [ "${__ce_have_min}" -lt "${__ce_min_min}" ]; }; then
+        echo "config_env.sh: --venv requires python >= ${CREDIT_MIN_PYTHON_VERSION}, but ${__ce_venv_py} is ${__ce_venv_ver}." >&2
+        unset __ce_venv_py __ce_venv_ver __ce_have_maj __ce_have_min __ce_min_maj __ce_min_min
+        return 1
+    fi
+
+    # --python-version under --venv is an ASSERTION, not a selection.
+    if [ "${__ce_py_explicit}" -eq 1 ] && [ "${CREDIT_PYTHON_VERSION}" != "${__ce_venv_ver}" ]; then
+        echo "config_env.sh: --venv requested python ${CREDIT_PYTHON_VERSION} but the python on PATH is ${__ce_venv_ver}" >&2
+        echo "                (${__ce_venv_py}); venv cannot install a different version.  Omit --python-version to" >&2
+        echo "                adopt ${__ce_venv_ver}, or put the desired python first on PATH." >&2
+        unset __ce_venv_py __ce_venv_ver __ce_have_maj __ce_have_min __ce_min_maj __ce_min_min
+        return 1
+    fi
+
+    CREDIT_PYTHON_VERSION="${__ce_venv_ver}"   # adopt (no-op if it already matched)
+    CREDIT_VENV_PYTHON="${__ce_venv_py}"
+    unset __ce_venv_py __ce_venv_ver __ce_have_maj __ce_have_min __ce_min_maj __ce_min_min
+}
+
+#----------------------------------------------------------------------------
 # Set up the preferred module environment (host-driven).
 __ce_setup_modules() {
     [ "${__CE_USE_MODULES}" -eq 1 ] || return 0
@@ -212,54 +275,53 @@ __ce_setup_modules() {
     run_quiet module reset
     run_quiet module load gcc/14.3.0 ${__CE_CUDA_MODULE}   # <=1 extra token: portable
     # Load ONLY the backend tool's module.  On Casper the conda and uv modules
-    # conflict, so we never load both; ${CREDIT_BACKEND} is "conda" or "uv".
-    run_quiet module load "${CREDIT_BACKEND}"
+    # conflict, so we never load both.  venv has no module -- it adopts the
+    # python3 already on PATH -- so it loads nothing here.
+    [ "${CREDIT_BACKEND}" = "venv" ] || run_quiet module load "${CREDIT_BACKEND}"
     run_quiet module list
 }
 
 #----------------------------------------------------------------------------
-# Locate the selected backend (conda or uv) and initialize it if needed.
-# Returns 1 if the backend tool cannot be found.
+# Locate/initialize the selected backend.  One case, one arm per backend (no
+# per-backend helper sprawl).  Returns 1 if the backend tool cannot be found.
+#   conda - load a module if available, verify the binary, then source conda.sh
+#           UNCONDITIONALLY: `conda activate` is a SHELL FUNCTION defined there
+#           (not the `conda` PATH binary) and is NOT inherited by an EXECUTED
+#           (non-sourced) script even though CONDA_SHLVL may be exported, so we
+#           cannot gate on CONDA_SHLVL; conda.sh is idempotent.
+#   uv    - load a module if available, verify the binary.  Per project policy uv
+#           is NOT bootstrapped here; if missing we stop with guidance.
+#   venv  - the interpreter was already resolved/validated by
+#           __ce_resolve_venv_python; just confirm `python -m venv` is usable.
 __ce_ensure_backend() {
-    if [ "${CREDIT_BACKEND}" = "uv" ]; then
-        __ce_ensure_uv
-    else
-        __ce_ensure_conda
-    fi
-}
-
-#----------------------------------------------------------------------------
-# Locate uv (it comes from a module on Casper, or is already on PATH on a
-# default host).  Per project policy uv is NOT bootstrapped here; if it cannot
-# be found we stop with guidance.  Returns 1 if uv is unavailable.
-__ce_ensure_uv() {
-    run_quiet module try-load uv
-    uv --version >/dev/null 2>&1 || {
-        echo "config_env.sh: cannot locate uv." >&2
-        echo "                Install it (https://docs.astral.sh/uv/) or 'module load uv', then re-run." >&2
-        return 1
-    }
-}
-
-#----------------------------------------------------------------------------
-# Locate conda (loading a module if available) and initialize it if needed.
-# Returns 1 if conda cannot be found.
-__ce_ensure_conda() {
-    run_quiet module try-load conda
-    conda --version >/dev/null 2>&1 || {
-        echo "config_env.sh: cannot locate conda." >&2
-        return 1
-    }
-
-    # `conda activate` is a SHELL FUNCTION defined by conda.sh -- not the
-    # `conda` PATH binary -- and it is NOT inherited by an EXECUTED (non-sourced)
-    # script, even though CONDA_SHLVL may be exported (e.g. "0") from the parent.
-    # So we cannot gate on CONDA_SHLVL; source conda.sh unconditionally (it is
-    # idempotent) to make `conda activate` work in THIS process.
-    CONDA_ROOT=$(conda info --base 2>/dev/null)
-    if [ -n "${CONDA_ROOT}" ] && [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
-        source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-    fi
+    case "${CREDIT_BACKEND}" in
+        conda)
+            run_quiet module try-load conda
+            conda --version >/dev/null 2>&1 || {
+                echo "config_env.sh: cannot locate conda." >&2
+                return 1
+            }
+            CONDA_ROOT=$(conda info --base 2>/dev/null)
+            if [ -n "${CONDA_ROOT}" ] && [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
+                source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+            fi
+            ;;
+        uv)
+            run_quiet module try-load uv
+            uv --version >/dev/null 2>&1 || {
+                echo "config_env.sh: cannot locate uv." >&2
+                echo "                Install it (https://docs.astral.sh/uv/) or 'module load uv', then re-run." >&2
+                return 1
+            }
+            ;;
+        venv)
+            "${CREDIT_VENV_PYTHON}" -m venv --help >/dev/null 2>&1 || {
+                echo "config_env.sh: '${CREDIT_VENV_PYTHON} -m venv' is unavailable" >&2
+                echo "                (the 'venv' stdlib module is missing for this interpreter)." >&2
+                return 1
+            }
+            ;;
+    esac
 }
 
 #----------------------------------------------------------------------------
@@ -310,15 +372,18 @@ __ce_check_manifest() {
 # Activate the environment if it already exists.  Returns 0 (activated) so the
 # caller can short-circuit, or 1 if there is nothing to activate.
 __ce_activate_if_exists() {
-    if [ "${CREDIT_BACKEND}" = "uv" ]; then
-        [ -f "${ENV_DIR}/bin/activate" ] || return 1
-        echo "Activating ${ENV_DIR}"
-        source "${ENV_DIR}/bin/activate"   # side effect propagates to the caller
-    else
-        [ -d "${ENV_DIR}" ] || return 1
-        echo "Activating ${ENV_DIR}"
-        conda activate "${ENV_DIR}"   # side effect propagates to the caller's shell
-    fi
+    case "${CREDIT_BACKEND}" in
+        uv|venv)   # both are standard venvs: a POSIX bin/activate script
+            [ -f "${ENV_DIR}/bin/activate" ] || return 1
+            echo "Activating ${ENV_DIR}"
+            source "${ENV_DIR}/bin/activate"   # side effect propagates to the caller
+            ;;
+        conda)
+            [ -d "${ENV_DIR}" ] || return 1
+            echo "Activating ${ENV_DIR}"
+            conda activate "${ENV_DIR}"   # side effect propagates to the caller's shell
+            ;;
+    esac
 }
 
 #----------------------------------------------------------------------------
@@ -345,10 +410,10 @@ __ce_source_runtime_hooks() {
 # below), so they are NOT listed here.
 __ce_cleanup() {
     unset CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
-          TARGET_HOST CONDA_ROOT \
-          __ce_show_help __ce_print_dir __ce_list __ce_bad_arg __ce_arg __ce_expect_val __ce_status 2>/dev/null
-    unset -f __ce_usage __ce_list run_quiet __ce_parse_args __ce_setup_modules \
-             __ce_ensure_backend __ce_ensure_uv __ce_ensure_conda __ce_maybe_rebuild \
+          CREDIT_VENV_PYTHON TARGET_HOST CONDA_ROOT \
+          __ce_show_help __ce_print_dir __ce_list __ce_bad_arg __ce_arg __ce_expect_val __ce_py_explicit __ce_status 2>/dev/null
+    unset -f __ce_usage __ce_list run_quiet __ce_parse_args __ce_resolve_venv_python __ce_setup_modules \
+             __ce_ensure_backend __ce_maybe_rebuild \
              __ce_check_manifest __ce_activate_if_exists __ce_source_runtime_hooks __ce_run 2>/dev/null
     # Clean up the versions_config.sh state we sourced in (defensive: it may be
     # absent if sourcing failed).  Self-unsets __ce_host_config[_cleanup], __ce_sha,
@@ -383,6 +448,10 @@ __ce_run() {
 
     TARGET_HOST="${NCAR_HOST:-default}"
 
+    # venv adopts the PATH python: resolve+validate it BEFORE host config so the
+    # detected version is what gets hashed into the prefix (and --print-env-dir).
+    __ce_resolve_venv_python || return 1
+
     __ce_host_config
 
     # --print-env-dir: emit the resolved (SHA-named) prefix and stop.  Needs host
@@ -408,6 +477,7 @@ __ce_run() {
     if [ ! -d "${ENV_DIR}" ]; then
         CREDIT_BACKEND="${CREDIT_BACKEND}" CREDIT_VERBOSE="${CREDIT_VERBOSE}" CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION}" \
             CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION}" CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION}" \
+            CREDIT_VENV_PYTHON="${CREDIT_VENV_PYTHON}" \
             "${SCRIPTDIR}/create_env.sh" || {
                 echo "config_env.sh: environment build failed." >&2
                 return 1
