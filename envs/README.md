@@ -98,9 +98,8 @@ unchanged.
   for the bare venv path).
 - `mpi4py` is still forced to a source build, via uv's `--no-binary mpi4py`
   (uv does not honor pip's `PIP_NO_BINARY`).
-- **`derecho` is supported under `--uv`.** Its one *non-Python* build dependency
-  (`libhwloc`) is no longer installed into the Python env: the plugin build
-  script provisions it in a **standalone conda env** under
+- `derecho`'s one *non-Python* build dependency
+  (`libhwloc`) is provisioned in a **standalone conda env** under
   `<env>/dependencies/hwloc-env` (using only the `conda` binary, never
   activated), so the choice of Python backend is irrelevant. The NCCL/CXI
   runtime variables are applied by **`config_env.sh` itself sourcing the hook**
