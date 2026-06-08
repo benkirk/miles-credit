@@ -41,8 +41,9 @@ SCRIPTDIR="$(realpath "$(dirname "$(realpath "${SCRIPT_PATH}")")")"
 # point and the build subprocess share ONE source of truth).  Must be sourced at
 # top level: __ce_host_config sets scalars the caller's shell then activates from.
 # versions_config.sh defines the CREDIT_DEFAULT_* defaults (consumed by
-# __ce_parse_args / __ce_usage below), so they are in scope after this line; its
-# cleanup is reached via __ce_host_config_cleanup.
+# __ce_parse_args / __ce_usage below), so they are in scope after this line.  It
+# defines no cleanup of its own: everything it sets carries an owned prefix
+# (__ce_*/__CE_*/CREDIT_*), so __ce_cleanup's glob wipes it along with our own.
 source "${SCRIPTDIR}/versions_config.sh"
 
 
@@ -140,7 +141,7 @@ __ce_list() {
 
 #----------------------------------------------------------------------------
 # Run a command quietly unless --verbose was given.
-run_quiet() {
+__ce_run_quiet() {
     if [ "${CREDIT_VERBOSE}" -eq 1 ]; then
         "$@"
     else
@@ -149,7 +150,7 @@ run_quiet() {
 }
 
 #----------------------------------------------------------------------------
-# Parse "$@" into CREDIT_VERBOSE / REBUILD / __ce_show_help / __ce_bad_arg.
+# Parse "$@" into CREDIT_VERBOSE / __ce_rebuild / __ce_show_help / __ce_bad_arg.
 # Called at top level so "$@" is the script's args.
 # Works whether SOURCED or EXECUTED, under bash & zsh.  We read "$@" directly:
 # verified correct in both shells when args are supplied to `source`.
@@ -158,7 +159,7 @@ run_quiet() {
 # interactive use (empty $@) is unaffected.
 __ce_parse_args() {
     CREDIT_VERBOSE=0
-    REBUILD=0
+    __ce_rebuild=0
     CREDIT_BACKEND="${CREDIT_DEFAULT_BACKEND}"          # versions_config.sh
     CREDIT_PYTHON_VERSION="${CREDIT_DEFAULT_PYTHON_VERSION}"  # versions_config.sh
     CREDIT_TORCH_VERSION=""          # empty = use versions_config.sh default
@@ -166,7 +167,7 @@ __ce_parse_args() {
     CREDIT_VENV_PYTHON=""            # --venv: resolved interpreter (see __ce_resolve_venv_python)
     __ce_py_explicit=0               # 1 once --python-version is seen (any form)
     __ce_show_help=0
-    __ce_print_dir=0          # --print-env-dir: resolve ENV_DIR and stop
+    __ce_print_dir=0          # --print-env-dir: resolve __CE_ENV_DIR and stop
     __ce_list=0               # --list: inventory built envs from their manifests
     __ce_bad_arg=""
     __ce_expect_val=""        # name of the option whose value the NEXT token is
@@ -196,7 +197,7 @@ __ce_parse_args() {
             --cuda-version)       __ce_expect_val="cuda-version" ;;
             --cuda-version=*)     CREDIT_CUDA_VERSION="${__ce_arg#*=}" ;;
             --verbose|-v)         CREDIT_VERBOSE=1 ;;
-            --rebuild|-r)         REBUILD=1 ;;
+            --rebuild|-r)         __ce_rebuild=1 ;;
             --print-env-dir)      __ce_print_dir=1 ;;
             --list)               __ce_list=1 ;;
             --help|-h)            __ce_show_help=1 ;;
@@ -270,15 +271,15 @@ __ce_setup_modules() {
     [ "${__CE_USE_MODULES}" -eq 1 ] || return 0
 
     type module >/dev/null 2>&1 || source /etc/profile.d/z00_modules.sh
-    run_quiet module --force purge
-    run_quiet module load ncarenv/25.10
-    run_quiet module reset
-    run_quiet module load gcc/14.3.0 ${__CE_CUDA_MODULE}   # <=1 extra token: portable
+    __ce_run_quiet module --force purge
+    __ce_run_quiet module load ncarenv/25.10
+    __ce_run_quiet module reset
+    __ce_run_quiet module load gcc/14.3.0 ${__CE_CUDA_MODULE}   # <=1 extra token: portable
     # Load ONLY the backend tool's module.  On Casper the conda and uv modules
     # conflict, so we never load both.  venv has no module -- it adopts the
     # python3 already on PATH -- so it loads nothing here.
-    [ "${CREDIT_BACKEND}" = "venv" ] || run_quiet module load "${CREDIT_BACKEND}"
-    run_quiet module list
+    [ "${CREDIT_BACKEND}" = "venv" ] || __ce_run_quiet module load "${CREDIT_BACKEND}"
+    __ce_run_quiet module list
 }
 
 #----------------------------------------------------------------------------
@@ -296,18 +297,18 @@ __ce_setup_modules() {
 __ce_ensure_backend() {
     case "${CREDIT_BACKEND}" in
         conda)
-            run_quiet module try-load conda
+            __ce_run_quiet module try-load conda
             conda --version >/dev/null 2>&1 || {
                 echo "config_env.sh: cannot locate conda." >&2
                 return 1
             }
-            CONDA_ROOT=$(conda info --base 2>/dev/null)
-            if [ -n "${CONDA_ROOT}" ] && [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
-                source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+            __ce_conda_root=$(conda info --base 2>/dev/null)
+            if [ -n "${__ce_conda_root}" ] && [ -f "${__ce_conda_root}/etc/profile.d/conda.sh" ]; then
+                source "${__ce_conda_root}/etc/profile.d/conda.sh"
             fi
             ;;
         uv)
-            run_quiet module try-load uv
+            __ce_run_quiet module try-load uv
             uv --version >/dev/null 2>&1 || {
                 echo "config_env.sh: cannot locate uv." >&2
                 echo "                Install it (https://docs.astral.sh/uv/) or 'module load uv', then re-run." >&2
@@ -330,16 +331,16 @@ __ce_ensure_backend() {
 # so the subsequent existence test falls through to the build path.
 # Returns 1 if the move fails.
 __ce_maybe_rebuild() {
-    [ -d "${ENV_DIR}" ] && [ "${REBUILD}" -eq 1 ] || return 0
+    [ -d "${__CE_ENV_DIR}" ] && [ "${__ce_rebuild}" -eq 1 ] || return 0
 
-    __ce_old="${ENV_DIR}.old.$$"
+    __ce_old="${__CE_ENV_DIR}.old.$$"
     echo "Rebuild requested; moving existing env aside: ${__ce_old}"
-    if mv "${ENV_DIR}" "${__ce_old}"; then
+    if mv "${__CE_ENV_DIR}" "${__ce_old}"; then
         echo "Removing ${__ce_old} in the background..."
         nohup rm -rf "${__ce_old}" >/dev/null 2>&1 &
         disown 2>/dev/null || true
     else
-        echo "config_env.sh: failed to move ${ENV_DIR} aside; aborting rebuild." >&2
+        echo "config_env.sh: failed to move ${__CE_ENV_DIR} aside; aborting rebuild." >&2
         unset __ce_old
         return 1
     fi
@@ -347,7 +348,7 @@ __ce_maybe_rebuild() {
 }
 
 #----------------------------------------------------------------------------
-# Integrity/identity guard before activation.  ENV_DIR is expected to exist here
+# Integrity/identity guard before activation.  __CE_ENV_DIR is expected to exist here
 # (just built, or pre-existing).  Its credit-env.manifest must be byte-for-byte
 # the string __ce_host_config hashed into the dir name, so re-checking it
 # confirms the env on disk really is the requested config.  A missing manifest
@@ -355,14 +356,14 @@ __ce_maybe_rebuild() {
 # a stale env) is fatal -- fail loudly with a --rebuild hint rather than activate
 # the wrong / half-built environment.  Returns 1 on mismatch.
 __ce_check_manifest() {
-    [ -d "${ENV_DIR}" ] || return 0   # nothing on disk -> activate step reports it
-    if [ ! -f "${ENV_DIR}/credit-env.manifest" ]; then
-        echo "config_env.sh: ${ENV_DIR} has no credit-env.manifest" >&2
+    [ -d "${__CE_ENV_DIR}" ] || return 0   # nothing on disk -> activate step reports it
+    if [ ! -f "${__CE_ENV_DIR}/credit-env.manifest" ]; then
+        echo "config_env.sh: ${__CE_ENV_DIR} has no credit-env.manifest" >&2
         echo "                (interrupted build?); re-run with --rebuild." >&2
         return 1
     fi
-    printf '%s' "${__CE_MANIFEST}" | cmp -s - "${ENV_DIR}/credit-env.manifest" || {
-        echo "config_env.sh: ${ENV_DIR} does not match the requested config" >&2
+    printf '%s' "${__CE_MANIFEST}" | cmp -s - "${__CE_ENV_DIR}/credit-env.manifest" || {
+        echo "config_env.sh: ${__CE_ENV_DIR} does not match the requested config" >&2
         echo "                (stale env or hash collision); re-run with --rebuild." >&2
         return 1
     }
@@ -374,14 +375,14 @@ __ce_check_manifest() {
 __ce_activate_if_exists() {
     case "${CREDIT_BACKEND}" in
         uv|venv)   # both are standard venvs: a POSIX bin/activate script
-            [ -f "${ENV_DIR}/bin/activate" ] || return 1
-            echo "Activating ${ENV_DIR}"
-            source "${ENV_DIR}/bin/activate"   # side effect propagates to the caller
+            [ -f "${__CE_ENV_DIR}/bin/activate" ] || return 1
+            echo "Activating ${__CE_ENV_DIR}"
+            source "${__CE_ENV_DIR}/bin/activate"   # side effect propagates to the caller
             ;;
         conda)
-            [ -d "${ENV_DIR}" ] || return 1
-            echo "Activating ${ENV_DIR}"
-            conda activate "${ENV_DIR}"   # side effect propagates to the caller's shell
+            [ -d "${__CE_ENV_DIR}" ] || return 1
+            echo "Activating ${__CE_ENV_DIR}"
+            conda activate "${__CE_ENV_DIR}"   # side effect propagates to the caller's shell
             ;;
     esac
 }
@@ -395,7 +396,7 @@ __ce_activate_if_exists() {
 # no-op (no plugin file) on hosts that do not build it.  For conda this overlaps
 # the activate.d hook -- a harmless, idempotent double-source.
 __ce_source_runtime_hooks() {
-    [ "${NEEDS_OFI_PLUGIN}" -eq 1 ] || return 0
+    [ "${__CE_NEEDS_OFI_PLUGIN}" -eq 1 ] || return 0
     [ -f "${SCRIPTDIR}/activate-nccl-hpe-cxi.sh" ] && \
         source "${SCRIPTDIR}/activate-nccl-hpe-cxi.sh"
     return 0
@@ -403,23 +404,26 @@ __ce_source_runtime_hooks() {
 
 #----------------------------------------------------------------------------
 # Tidy up all shell state (important when SOURCED -- functions and vars defined
-# here would otherwise persist in the caller's interactive shell).
-# NOTE: when adding a new function/var above, add its name here too.  The
-# host-policy vars/functions AND the CREDIT_DEFAULT_* constants are owned by
-# versions_config.sh and cleaned up by its __ce_host_config_cleanup (invoked
-# below), so they are NOT listed here.
+# here, AND in the versions_config.sh we sourced, would otherwise persist in the
+# caller's interactive shell).  Done by GLOB over the owned prefixes rather than
+# an enumerated list: every name we define is __ce_*/__CE_*/CREDIT_* (vars) or
+# __ce_* (funcs), and nothing else uses those prefixes, so the glob is exact --
+# CONDA_PREFIX/VIRTUAL_ENV (set by activation, not us) and PIP_NO_BINARY (pip's
+# own, set only in the build subprocess) never match and survive.  One glob here
+# covers versions_config.sh's state too (same prefixes), so there is NO separate
+# per-file cleanup.  Adding new state needs NO edit here as long as it carries an
+# owned prefix.  The enumeration syntax differs per shell; both branches tolerate
+# zero matches and self-unset __ce_cleanup mid-run (the running instance still
+# completes the final `return`).  $1 (the status) is read by `return` and never
+# clobbered (no positional/temp-var juggling).
 __ce_cleanup() {
-    unset CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
-          CREDIT_VENV_PYTHON TARGET_HOST CONDA_ROOT \
-          __ce_show_help __ce_print_dir __ce_list __ce_bad_arg __ce_arg __ce_expect_val __ce_py_explicit __ce_status 2>/dev/null
-    unset -f __ce_usage __ce_list run_quiet __ce_parse_args __ce_resolve_venv_python __ce_setup_modules \
-             __ce_ensure_backend __ce_maybe_rebuild \
-             __ce_check_manifest __ce_activate_if_exists __ce_source_runtime_hooks __ce_run 2>/dev/null
-    # Clean up the versions_config.sh state we sourced in (defensive: it may be
-    # absent if sourcing failed).  Self-unsets __ce_host_config[_cleanup], __ce_sha,
-    # the host-policy scalars, AND the CREDIT_DEFAULT_* constants.
-    command -v __ce_host_config_cleanup >/dev/null 2>&1 && __ce_host_config_cleanup
-    unset -f __ce_cleanup 2>/dev/null   # self-unset LAST
+    if [ -n "${ZSH_VERSION:-}" ]; then
+        unset ${(k)parameters[(I)(__ce_*|__CE_*|CREDIT_*)]} 2>/dev/null
+        unset -f ${(k)functions[(I)__ce_*]} 2>/dev/null
+    else
+        unset -f $(compgen -A function __ce_ 2>/dev/null) 2>/dev/null
+        unset ${!__ce_@} ${!__CE_@} ${!CREDIT_@} 2>/dev/null
+    fi
     return "${1:-0}"                    # propagate the status passed in
 }
 
@@ -446,7 +450,7 @@ __ce_run() {
         return 2
     fi
 
-    TARGET_HOST="${NCAR_HOST:-default}"
+    __ce_target_host="${NCAR_HOST:-default}"
 
     # venv adopts the PATH python: resolve+validate it BEFORE host config so the
     # detected version is what gets hashed into the prefix (and --print-env-dir).
@@ -457,7 +461,7 @@ __ce_run() {
     # --print-env-dir: emit the resolved (SHA-named) prefix and stop.  Needs host
     # config for the hash, but no modules/backend/build/activate.
     if [ "${__ce_print_dir}" -eq 1 ]; then
-        echo "${ENV_DIR}"
+        echo "${__CE_ENV_DIR}"
         return 2
     fi
 
@@ -474,7 +478,7 @@ __ce_run() {
     # regardless of build-vs-already-exists.  __ce_activate_if_exists then
     # doubles as the post-build success gate.  Finally source any runtime hooks
     # so every `source config_env.sh` sets the NCCL/CXI + plugin-discovery env.
-    if [ ! -d "${ENV_DIR}" ]; then
+    if [ ! -d "${__CE_ENV_DIR}" ]; then
         CREDIT_BACKEND="${CREDIT_BACKEND}" CREDIT_VERBOSE="${CREDIT_VERBOSE}" CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION}" \
             CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION}" CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION}" \
             CREDIT_VENV_PYTHON="${CREDIT_VENV_PYTHON}" \
@@ -487,7 +491,7 @@ __ce_run() {
     __ce_check_manifest || return 1
 
     __ce_activate_if_exists || {
-        echo "config_env.sh: env expected after build but not activatable: ${ENV_DIR}" >&2
+        echo "config_env.sh: env expected after build but not activatable: ${__CE_ENV_DIR}" >&2
         return 1
     }
 

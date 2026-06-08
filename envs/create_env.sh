@@ -21,12 +21,12 @@
 #   CREDIT_PYTHON_VERSION - Python to build with (default from versions_config.sh)
 #   CREDIT_TORCH_VERSION  - optional torch version pin (empty -> versions_config.sh default)
 #   CREDIT_CUDA_VERSION   - optional CUDA build of torch (empty -> host/global default)
-#   NCAR_HOST      - host id (-> TARGET_HOST); already in the HPC environment
+#   NCAR_HOST      - host id (-> __ce_target_host); already in the HPC environment
 #   plus the module environment the parent loaded (PATH/CC/CUDA_HOME/...),
 #   which IS inherited by this subprocess.
 #
-# Host policy (ENV_DIR, pip target, NCCL/OFI flags) is recomputed HERE from the
-# shared versions_config.sh given the same TARGET_HOST/CREDIT_BACKEND, so parent and
+# Host policy (__CE_ENV_DIR, pip target, NCCL/OFI flags) is recomputed HERE from the
+# shared versions_config.sh given the same __ce_target_host/CREDIT_BACKEND, so parent and
 # child agree by construction rather than via a fragile export list.
 #----------------------------------------------------------------------------
 
@@ -40,7 +40,7 @@ CREDIT_PYTHON_VERSION="${CREDIT_PYTHON_VERSION:-${CREDIT_DEFAULT_PYTHON_VERSION}
 CREDIT_TORCH_VERSION="${CREDIT_TORCH_VERSION:-}"
 CREDIT_CUDA_VERSION="${CREDIT_CUDA_VERSION:-}"
 CREDIT_VENV_PYTHON="${CREDIT_VENV_PYTHON:-python3}"   # --venv interpreter (parent-resolved)
-TARGET_HOST="${NCAR_HOST:-default}"
+__ce_target_host="${NCAR_HOST:-default}"
 __ce_host_config
 
 # `conda activate` is a SHELL FUNCTION defined by conda.sh -- not the `conda`
@@ -50,9 +50,9 @@ __ce_host_config
 # make `conda activate` work below.  (The uv and venv paths activate a venv FILE
 # we are about to create, so they have no such inheritance issue.)
 if [ "${CREDIT_BACKEND}" = "conda" ]; then
-    CONDA_ROOT=$(conda info --base 2>/dev/null)
-    if [ -n "${CONDA_ROOT}" ] && [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
-        source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+    __ce_conda_root=$(conda info --base 2>/dev/null)
+    if [ -n "${__ce_conda_root}" ] && [ -f "${__ce_conda_root}/etc/profile.d/conda.sh" ]; then
+        source "${__ce_conda_root}/etc/profile.d/conda.sh"
     fi
 fi
 
@@ -70,12 +70,12 @@ case "${CREDIT_BACKEND}" in
         # uv symlinks the venv's python at that external interpreter, which then
         # dangles if it is later rebuilt or removed (breaking the uv env and the
         # conda/uv "coexistence" guarantee).
-        uv venv --managed-python --python "${CREDIT_PYTHON_VERSION}" "${ENV_DIR}" || {
+        uv venv --managed-python --python "${CREDIT_PYTHON_VERSION}" "${__CE_ENV_DIR}" || {
             echo "create_env.sh: 'uv venv' failed." >&2
             exit 1
         }
-        source "${ENV_DIR}/bin/activate" || {
-            echo "create_env.sh: activating uv venv '${ENV_DIR}' failed." >&2
+        source "${__CE_ENV_DIR}/bin/activate" || {
+            echo "create_env.sh: activating uv venv '${__CE_ENV_DIR}' failed." >&2
             exit 1
         }
         ;;
@@ -84,26 +84,26 @@ case "${CREDIT_BACKEND}" in
         # validated (CREDIT_VENV_PYTHON; its version == CREDIT_PYTHON_VERSION).
         # Unlike uv we deliberately ADOPT that interpreter -- that is the point
         # of this backend (independent of conda and uv).
-        "${CREDIT_VENV_PYTHON}" -m venv "${ENV_DIR}" || {
+        "${CREDIT_VENV_PYTHON}" -m venv "${__CE_ENV_DIR}" || {
             echo "create_env.sh: '${CREDIT_VENV_PYTHON} -m venv' failed." >&2
             exit 1
         }
-        source "${ENV_DIR}/bin/activate" || {
-            echo "create_env.sh: activating venv '${ENV_DIR}' failed." >&2
+        source "${__CE_ENV_DIR}/bin/activate" || {
+            echo "create_env.sh: activating venv '${__CE_ENV_DIR}' failed." >&2
             exit 1
         }
         ;;
     conda)
         conda create \
               --yes \
-              --prefix "${ENV_DIR}" \
+              --prefix "${__CE_ENV_DIR}" \
               python="${CREDIT_PYTHON_VERSION}" || {
             echo "create_env.sh: 'conda create' failed." >&2
             exit 1
         }
 
-        conda activate "${ENV_DIR}" || {
-            echo "create_env.sh: 'conda activate ${ENV_DIR}' failed." >&2
+        conda activate "${__CE_ENV_DIR}" || {
+            echo "create_env.sh: 'conda activate ${__CE_ENV_DIR}' failed." >&2
             exit 1
         }
         ;;
@@ -119,16 +119,16 @@ esac
 # to "success".  conda and venv both drive the now-active env's plain `pip`
 # (PIP_NO_BINARY forces the mpi4py source build); only uv differs.
 if [ "${CREDIT_BACKEND}" = "uv" ]; then
-    set -- uv pip install --no-binary mpi4py -e "${PIP_TARGET_SPEC}"
+    set -- uv pip install --no-binary mpi4py -e "${__CE_PIP_TARGET_SPEC}"
 else
     export PIP_NO_BINARY="mpi4py"
-    set -- pip install -e "${PIP_TARGET_SPEC}"
+    set -- pip install -e "${__CE_PIP_TARGET_SPEC}"
 fi
 # Pin torch (version + CUDA build) on the command line on CUDA hosts, with the
 # matching PyTorch index appended right after.  Both come from versions_config.sh
 # (driven by --torch-version/--cuda-version) -- empty on non-CUDA installs.
 [ -n "${__CE_TORCH_SPEC}" ] && set -- "$@" "${__CE_TORCH_SPEC}"
-[ -n "${PIP_EXTRA_URL}" ]   && set -- "$@" --extra-index-url "${PIP_EXTRA_URL}"
+[ -n "${__CE_PIP_EXTRA_URL}" ]   && set -- "$@" --extra-index-url "${__CE_PIP_EXTRA_URL}"
 # The command is assembled dynamically (backend, extra, torch pin, index); echo
 # the fully expanded form under --verbose so it is reproducible.  %q quotes each
 # arg safely and is supported by both bash and zsh.
@@ -140,7 +140,7 @@ fi
 
 #-------------------------------------------------------
 # host-specific post-install steps
-if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
+if [ "${__CE_NEEDS_OFI_PLUGIN}" -eq 1 ]; then
 
     # Build the AWS OFI NCCL plugin and its non-Python build dependency
     # (hwloc) under a single per-env "dependencies" prefix, independent of
@@ -149,7 +149,7 @@ if [ "${NEEDS_OFI_PLUGIN}" -eq 1 ]; then
     # its own hwloc prefix/rpath decision.  Fail loudly: a broken plugin must
     # NOT report success.
     export AWS_OFI_NCCL_VERSION="${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}"   # versions_config.sh
-    export AWS_OFI_PLUGIN_HOME="${ENV_DIR}/dependencies"
+    export AWS_OFI_PLUGIN_HOME="${__CE_ENV_DIR}/dependencies"
     export CREDIT_CUDA_VERSION="${__CE_CUDA_VER}"   # resolved CLI>host>global; for hwloc's conda build
     ${SCRIPTDIR}/build-aws-ofi-nccl-plugin.sh || {
         echo "create_env.sh: aws-ofi-nccl plugin build failed." >&2
@@ -187,12 +187,12 @@ python "$@" || {
 
 #-------------------------------------------------------
 # Record the env's identity: write the EXACT manifest string that __ce_host_config
-# hashed into ENV_DIR's name (recomputed here, identical by construction).  It is
+# hashed into __CE_ENV_DIR's name (recomputed here, identical by construction).  It is
 # byte-for-byte what was hashed, so re-hashing the file reproduces the dir's SHA
 # (integrity), and config_env.sh's activate-path guard compares against it.  Only
 # after the health check passes, so an incomplete build never leaves a manifest.
-printf '%s' "${__CE_MANIFEST}" > "${ENV_DIR}/credit-env.manifest" || {
-    echo "create_env.sh: failed to write ${ENV_DIR}/credit-env.manifest." >&2
+printf '%s' "${__CE_MANIFEST}" > "${__CE_ENV_DIR}/credit-env.manifest" || {
+    echo "create_env.sh: failed to write ${__CE_ENV_DIR}/credit-env.manifest." >&2
     exit 1
 }
 
@@ -201,15 +201,15 @@ printf '%s' "${__CE_MANIFEST}" > "${ENV_DIR}/credit-env.manifest" || {
 echo
 case "${CREDIT_BACKEND}" in
     uv)
-        echo "\"${ENV_NAME}\" uv environment for ${TARGET_HOST} successfully installed into ${VIRTUAL_ENV}"
-        echo "use \"source ${ENV_DIR}/bin/activate\" to activate"
+        echo "\"${__CE_ENV_NAME}\" uv environment for ${__ce_target_host} successfully installed into ${VIRTUAL_ENV}"
+        echo "use \"source ${__CE_ENV_DIR}/bin/activate\" to activate"
         ;;
     venv)
-        echo "\"${ENV_NAME}\" venv environment for ${TARGET_HOST} successfully installed into ${VIRTUAL_ENV}"
-        echo "use \"source ${ENV_DIR}/bin/activate\" to activate"
+        echo "\"${__CE_ENV_NAME}\" venv environment for ${__ce_target_host} successfully installed into ${VIRTUAL_ENV}"
+        echo "use \"source ${__CE_ENV_DIR}/bin/activate\" to activate"
         ;;
     conda)
-        echo "\"${ENV_NAME}\" conda environment for ${TARGET_HOST} successfully installed into ${CONDA_PREFIX}"
-        echo "use \"conda activate ${ENV_DIR}\" to activate"
+        echo "\"${__CE_ENV_NAME}\" conda environment for ${__ce_target_host} successfully installed into ${CONDA_PREFIX}"
+        echo "use \"conda activate ${__CE_ENV_DIR}\" to activate"
         ;;
 esac

@@ -180,9 +180,20 @@ runs:
           */envs/$CE_ENV) echo "OK: $CE_MARKER=$marker_val" ;;
           *) echo "FAIL: $CE_MARKER not the env: '$marker_val'"; exit 1 ;;
         esac
-        for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_list __ce_check_manifest __ce_ensure_backend __ce_resolve_venv_python run_quiet; do
-          if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
-        done
+        # Catch-all leak scan by owned prefix (same globs __ce_cleanup uses), not
+        # an enumerated list -- catches ANY __ce_*/__CE_*/CREDIT_* var or __ce_*
+        # function that leaks.  The activation marker ($CE_MARKER above, i.e.
+        # CONDA_PREFIX/VIRTUAL_ENV) is NOT an owned prefix, so it correctly survives.
+        if [ -n "${ZSH_VERSION:-}" ]; then
+          leak="${(k)parameters[(I)(__ce_*|__CE_*|CREDIT_*)]} ${(k)functions[(I)__ce_*]}"
+        else
+          # `|| true`: compgen returns 1 when NOTHING matches (the clean case),
+          # which would abort the `leak=$(...)` assignment if errexit is active
+          # (conda activation can leave `set -e` on in the sourcing shell).
+          leak="$( { for v in ${!__ce_@} ${!__CE_@} ${!CREDIT_@}; do echo "$v"; done
+                     compgen -A function __ce_; } 2>/dev/null || true )"
+        fi
+        if [ -n "${leak// /}" ]; then echo "FAIL: leaked owned-prefix names: $leak"; exit 1; fi
         echo "OK: source-activate leaves no residue"
         EOF
         ${{ inputs.shell }} "$RUNNER_TEMP/src_activate.sh" $CE_ARGS

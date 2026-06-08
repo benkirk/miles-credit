@@ -4,7 +4,7 @@
 #----------------------------------------------------------------------------
 # Versions + per-host policy for the CREDIT environment scripts -- the SINGLE
 # SOURCE OF TRUTH for BOTH the DEFAULT versions (python/torch/CUDA/AWS plugin +
-# the default backend) AND all per-host build policy (ENV_DIR, pip target, module
+# the default backend) AND all per-host build policy (__CE_ENV_DIR, pip target, module
 # set, NCCL/OFI flags, the config manifest + its SHA).  Keeping both here means
 # every process derives identical values from the same code, with no fragile
 # cross-process export list.
@@ -18,10 +18,10 @@
 # Bump a default = a one-line edit to the CREDIT_DEFAULT_* block below.
 #
 # Inputs to __ce_host_config (set by the sourcer BEFORE calling it): CREDIT_BACKEND
-# and CREDIT_PYTHON_VERSION; it reads TARGET_HOST too; CREDIT_TORCH_VERSION and
+# and CREDIT_PYTHON_VERSION; it reads __ce_target_host too; CREDIT_TORCH_VERSION and
 # CREDIT_CUDA_VERSION are optional (empty => host/global defaults apply).  SCRIPTDIR
 # (the envs/ dir) need only be set before __ce_host_config is CALLED -- it is used
-# for ENV_DIR -- not at source time (this file no longer sources a sibling).
+# for __CE_ENV_DIR -- not at source time (this file no longer sources a sibling).
 #
 # Like config_env.sh this must be portable to BOTH bash and zsh (no associative
 # arrays; no reliance on word-splitting).
@@ -29,10 +29,10 @@
 
 
 # Central, single source of truth for the DEFAULT versions and the default
-# backend.  THIS is the one place to bump them.  Self-unset by
-# __ce_host_config_cleanup below (only meaningful when sourced into a long-lived
-# shell via config_env.sh; the create_env.sh / build-aws-ofi-nccl-plugin.sh
-# subprocesses never clean up -- they pollute nothing).
+# backend.  THIS is the one place to bump them.  CREDIT_*-prefixed, so they are
+# wiped by config_env.sh's glob cleanup when sourced into a long-lived shell; the
+# create_env.sh / build-aws-ofi-nccl-plugin.sh subprocesses never clean up --
+# they pollute nothing.
 CREDIT_DEFAULT_BACKEND="conda"          # packaging backend when --uv is absent
 CREDIT_DEFAULT_PYTHON_VERSION="3.11"    # --python-version default
 CREDIT_MIN_PYTHON_VERSION="3.11"        # floor for the --venv backend (adopts the
@@ -52,13 +52,13 @@ CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION="v1.19.2"   # aws-ofi-nccl plugin tag
 #                      fixed field order); hashed for the prefix and written
 #                      verbatim into the built env as credit-env.manifest.
 #   __CE_SHA         - 8-hex content hash of __CE_MANIFEST (via __ce_sha).
-#   ENV_NAME         - <backend>-credit-env[-<host>]-<__CE_SHA>
-#   ENV_DIR          - derived here, once
-#   PIP_EXTRA_URL    - bare extra-index URL, or "" (kept as a URL, not a
+#   __CE_ENV_NAME         - <backend>-credit-env[-<host>]-<__CE_SHA>
+#   __CE_ENV_DIR          - derived here, once
+#   __CE_PIP_EXTRA_URL    - bare extra-index URL, or "" (kept as a URL, not a
 #                      "--extra-index-url <url>" string, so we never depend
 #                      on word-splitting -- which differs between bash & zsh).
 #                      Derived from the resolved CUDA version on CUDA hosts.
-#   PIP_TARGET_SPEC  - "."  or  ".[distributed]"  (the single MPI extra; the
+#   __CE_PIP_TARGET_SPEC  - "."  or  ".[distributed]"  (the single MPI extra; the
 #                      torch/CUDA pin is NOT in pyproject -- see __CE_TORCH_SPEC)
 #   __CE_TORCH_SPEC  - "" or "torch==<ver>+cu<tag>": explicit torch pin appended
 #                      to the pip line on CUDA hosts.  Replaces the former
@@ -68,7 +68,7 @@ CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION="v1.19.2"   # aws-ofi-nccl plugin tag
 #   __CE_CUDA_MODULE - ""  or  "cuda"  (<= 1 token, so unquoted expansion is
 #                      identical in bash and zsh)
 #   __CE_USE_MODULES - 0/1 (run the module dance?)
-#   NEEDS_OFI_PLUGIN - 0/1 (derecho-only post-build steps)
+#   __CE_NEEDS_OFI_PLUGIN - 0/1 (derecho-only post-build steps)
 #   __CE_EXPECT_NCCL - 0/1 (is NCCL expected here? -> health check requires it.
 #                      NCCL is optional in general but expected on the GPU/HPC
 #                      hosts we cannot exercise on free CI: casper, derecho)
@@ -90,19 +90,19 @@ CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION="v1.19.2"   # aws-ofi-nccl plugin tag
 # "gcc + <backend> [+ cuda]", branch in __ce_setup_modules in config_env.sh --
 # the one other host-aware spot.)
 __ce_host_config() {
-    ENV_NAME="credit-env"
-    PIP_EXTRA_URL=""
-    PIP_TARGET_SPEC="."
+    __CE_ENV_NAME="credit-env"
+    __CE_PIP_EXTRA_URL=""
+    __CE_PIP_TARGET_SPEC="."
     __CE_TORCH_SPEC=""
     __CE_CUDA_MODULE=""
     __CE_USE_MODULES=0
-    NEEDS_OFI_PLUGIN=0
+    __CE_NEEDS_OFI_PLUGIN=0
     __CE_EXPECT_NCCL=0
     __CE_WANT_CUDA=0
     __CE_DEFAULT_CUDA=""
     __CE_CUDA_VER=""
 
-    case "${TARGET_HOST}" in
+    case "${__ce_target_host}" in
 
         "default")
             # vanilla conda, nothing special; all defaults above apply.
@@ -111,7 +111,7 @@ __ce_host_config() {
 
         "casper")
             __CE_USE_MODULES=1
-            PIP_TARGET_SPEC=".[distributed]"
+            __CE_PIP_TARGET_SPEC=".[distributed]"
             __CE_EXPECT_NCCL=1
             __CE_WANT_CUDA=1          # default CUDA -> CREDIT_DEFAULT_CUDA_VERSION
             ;;
@@ -119,15 +119,15 @@ __ce_host_config() {
         "derecho")
             __CE_USE_MODULES=1
             __CE_CUDA_MODULE="cuda"
-            PIP_TARGET_SPEC=".[distributed]"
-            NEEDS_OFI_PLUGIN=1
+            __CE_PIP_TARGET_SPEC=".[distributed]"
+            __CE_NEEDS_OFI_PLUGIN=1
             __CE_EXPECT_NCCL=1
             __CE_WANT_CUDA=1
             __CE_DEFAULT_CUDA="12.9"  # derecho ships a newer CUDA than the global default
             ;;
 
         *)
-            echo "ERROR: unhandled ${TARGET_HOST}?!!" >&2
+            echo "ERROR: unhandled ${__ce_target_host}?!!" >&2
             ;;
     esac
 
@@ -140,12 +140,12 @@ __ce_host_config() {
         __CE_TORCH_VER="${CREDIT_TORCH_VERSION:-${CREDIT_DEFAULT_TORCH_VERSION}}"
         __CE_CUDA_VER="${CREDIT_CUDA_VERSION:-${__CE_DEFAULT_CUDA:-${CREDIT_DEFAULT_CUDA_VERSION}}}"
         __CE_CUDA_TAG="cu${__CE_CUDA_VER//./}"
-        PIP_EXTRA_URL="https://download.pytorch.org/whl/${__CE_CUDA_TAG}"
+        __CE_PIP_EXTRA_URL="https://download.pytorch.org/whl/${__CE_CUDA_TAG}"
         __CE_TORCH_SPEC="torch==${__CE_TORCH_VER}+${__CE_CUDA_TAG}"
         unset __CE_TORCH_VER __CE_CUDA_TAG   # keep __CE_CUDA_VER (a documented output)
     elif [ -n "${CREDIT_TORCH_VERSION}" ]; then
         # No CUDA build requested, but the user pinned a torch version with
-        # --torch-version: pin the CPU build of torch from PyPI.  PIP_EXTRA_URL
+        # --torch-version: pin the CPU build of torch from PyPI.  __CE_PIP_EXTRA_URL
         # stays empty (set above), so the default index serves the CPU wheel --
         # no +cu<tag> suffix, no --extra-index-url.  When NEITHER a CUDA build
         # nor --torch-version is requested, both arms are skipped and torch
@@ -171,15 +171,15 @@ __ce_host_config() {
     __CE_MANIFEST="$(printf '%s' \
 "schema=1
 backend=${CREDIT_BACKEND}
-host=${TARGET_HOST}
+host=${__ce_target_host}
 python=${CREDIT_PYTHON_VERSION}
 torch=${CREDIT_TORCH_VERSION}
 cuda=${CREDIT_CUDA_VERSION}
 torch_spec=${__CE_TORCH_SPEC}
-pip_extra_url=${PIP_EXTRA_URL}
-pip_target=${PIP_TARGET_SPEC}
-aws_ofi_nccl=$([ "${NEEDS_OFI_PLUGIN}" -eq 1 ] && printf '%s' "${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}")
-ofi_plugin=${NEEDS_OFI_PLUGIN}")"
+pip_extra_url=${__CE_PIP_EXTRA_URL}
+pip_target=${__CE_PIP_TARGET_SPEC}
+aws_ofi_nccl=$([ "${__CE_NEEDS_OFI_PLUGIN}" -eq 1 ] && printf '%s' "${CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION}")
+ofi_plugin=${__CE_NEEDS_OFI_PLUGIN}")"
 
     # Name = <backend>-credit-env[-<host>]-<short-sha>.  backend leads (covers
     # conda AND uv explicitly, replacing the old -uv suffix / bare-conda
@@ -188,11 +188,11 @@ ofi_plugin=${NEEDS_OFI_PLUGIN}")"
     # inputs are config-derived (non-adversarial) and the manifest-match guard in
     # config_env.sh is the backstop, so collision risk is negligible.
     __CE_SHA="$(printf '%s' "${__CE_MANIFEST}" | __ce_sha | cut -c1-8)"
-    ENV_NAME="${CREDIT_BACKEND}-credit-env"
-    [ "${TARGET_HOST}" != "default" ] && ENV_NAME="${ENV_NAME}-${TARGET_HOST}"
-    ENV_NAME="${ENV_NAME}-${__CE_SHA}"
+    __CE_ENV_NAME="${CREDIT_BACKEND}-credit-env"
+    [ "${__ce_target_host}" != "default" ] && __CE_ENV_NAME="${__CE_ENV_NAME}-${__ce_target_host}"
+    __CE_ENV_NAME="${__CE_ENV_NAME}-${__CE_SHA}"
 
-    ENV_DIR="${SCRIPTDIR}/${ENV_NAME}"
+    __CE_ENV_DIR="${SCRIPTDIR}/${__CE_ENV_NAME}"
 }
 
 #----------------------------------------------------------------------------
@@ -222,18 +222,8 @@ __ce_sha() {
 }
 
 #----------------------------------------------------------------------------
-# Tidy up the shell state THIS file defines.  Co-located with the definitions
-# above so adding a var/function here means updating the cleanup in the SAME
-# file (config_env.sh's __ce_cleanup just invokes this).  Only meaningful when
-# sourced into a long-lived shell (i.e. config_env.sh sourced); harmless in the
-# create_env.sh subprocess, which never calls it.
-__ce_host_config_cleanup() {
-    unset ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
-          __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
-          __CE_WANT_CUDA __CE_DEFAULT_CUDA __CE_CUDA_VER __CE_MANIFEST __CE_SHA \
-          CREDIT_DEFAULT_BACKEND CREDIT_DEFAULT_PYTHON_VERSION CREDIT_MIN_PYTHON_VERSION \
-          CREDIT_DEFAULT_TORCH_VERSION CREDIT_DEFAULT_CUDA_VERSION \
-          CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION 2>/dev/null
-    unset -f __ce_host_config __ce_sha 2>/dev/null
-    unset -f __ce_host_config_cleanup 2>/dev/null   # self-unset LAST
-}
+# NOTE: this file defines NO cleanup of its own.  Everything it defines carries
+# an owned prefix (vars __CE_*/ENV_*-renamed-to-__CE_*/CREDIT_*; funcs __ce_*),
+# so config_env.sh's __ce_cleanup wipes it by a single glob over those prefixes.
+# (The create_env.sh / build-aws-ofi-nccl-plugin.sh subprocesses source this file
+# but never clean up -- they exit, polluting nothing.)
