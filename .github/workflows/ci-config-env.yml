@@ -175,8 +175,11 @@ jobs:
           if [ -n "${ZSH_VERSION:-}" ]; then
             leak="${(k)parameters[(I)(__ce_*|__CE_*|CREDIT_*)]} ${(k)functions[(I)__ce_*]}"
           else
+            # `|| true`: compgen returns 1 when NOTHING matches (the clean case),
+            # which would abort the `leak=$(...)` assignment if errexit is active
+            # (conda activation can leave `set -e` on in the sourcing shell).
             leak="$( { for v in ${!__ce_@} ${!__CE_@} ${!CREDIT_@}; do echo "$v"; done
-                       compgen -A function __ce_; } 2>/dev/null )"
+                       compgen -A function __ce_; } 2>/dev/null || true )"
           fi
           if [ -n "${leak// /}" ]; then echo "FAIL: leaked owned-prefix names: $leak"; exit 1; fi
           echo "OK: dual-mode source leaves no residue"
