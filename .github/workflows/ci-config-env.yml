@@ -16,8 +16,8 @@ name: CI config_env.sh installer
 #   - source mode  -> write the body to a temp script and run `<shell> body.sh`,
 #     which sources config_env.sh; sourced-mode detection fires in both shells.
 # The temp scripts deliberately run WITHOUT `set -e`: config_env.sh is meant to
-# be sourced into a normal (no -e) shell (e.g. `run_quiet module try-load conda`
-# returns 127 on a non-module host), so -e would spuriously abort it.
+# be sourced into a normal (no -e) shell (e.g. `__ce_run_quiet module try-load
+# conda` returns 127 on a non-module host), so -e would spuriously abort it.
 
 on:
   pull_request:
@@ -165,25 +165,20 @@ jobs:
           cat > "$RUNNER_TEMP/src_help.sh" <<'EOF'
           source envs/config_env.sh --help; rc=$?
           [ "$rc" -eq 0 ] || { echo "FAIL: source --help rc=$rc (want 0)"; exit 1; }
-          # No helper FUNCTIONS may survive in the caller shell (config_env.sh,
-          # plus the versions_config.sh it sources -> __ce_host_config[_cleanup]
-          # and __ce_sha).
-          for fn in __ce_run __ce_cleanup __ce_host_config __ce_host_config_cleanup __ce_sha __ce_ensure_backend __ce_resolve_venv_python run_quiet; do
-            if command -v "$fn" >/dev/null 2>&1; then echo "FAIL: leaked function: $fn"; exit 1; fi
-          done
-          # No helper VARIABLES may survive (${VAR+set} is a set-test, bash & zsh).
-          # Includes the CREDIT_*-namespaced inputs, the host-policy scalars, and
-          # the CREDIT_DEFAULT_* constants -- all owned by versions_config.sh.
-          for v in CONDA_ROOT CREDIT_VERBOSE REBUILD CREDIT_BACKEND CREDIT_PYTHON_VERSION CREDIT_TORCH_VERSION CREDIT_CUDA_VERSION \
-                   CREDIT_VENV_PYTHON TARGET_HOST __ce_status __ce_expect_val __ce_py_explicit \
-                   ENV_NAME ENV_DIR PIP_EXTRA_URL PIP_TARGET_SPEC __CE_TORCH_SPEC \
-                   __CE_CUDA_MODULE __CE_USE_MODULES NEEDS_OFI_PLUGIN __CE_EXPECT_NCCL \
-                   __CE_WANT_CUDA __CE_DEFAULT_CUDA \
-                   CREDIT_DEFAULT_BACKEND CREDIT_DEFAULT_PYTHON_VERSION CREDIT_MIN_PYTHON_VERSION CREDIT_DEFAULT_TORCH_VERSION \
-                   CREDIT_DEFAULT_CUDA_VERSION CREDIT_DEFAULT_AWS_OFI_NCCL_VERSION; do
-            eval "probe=\${$v+set}"
-            if [ "${probe:-}" = set ]; then echo "FAIL: leaked variable: $v"; exit 1; fi
-          done
+          # Catch-all: NOTHING the script defines may survive in the caller shell.
+          # Everything it owns carries a prefix (vars __ce_*/__CE_*/CREDIT_*; funcs
+          # __ce_*), and __ce_cleanup wipes them by glob -- so we VERIFY by the same
+          # glob rather than an enumerated list (which silently misses any new name
+          # nobody added).  CONDA_PREFIX/VIRTUAL_ENV/PIP_NO_BINARY don't match these
+          # prefixes, so they are correctly ignored.  Enumeration syntax differs per
+          # shell; this temp script is run under the shell-under-test.
+          if [ -n "${ZSH_VERSION:-}" ]; then
+            leak="${(k)parameters[(I)(__ce_*|__CE_*|CREDIT_*)]} ${(k)functions[(I)__ce_*]}"
+          else
+            leak="$( { for v in ${!__ce_@} ${!__CE_@} ${!CREDIT_@}; do echo "$v"; done
+                       compgen -A function __ce_; } 2>/dev/null )"
+          fi
+          if [ -n "${leak// /}" ]; then echo "FAIL: leaked owned-prefix names: $leak"; exit 1; fi
           echo "OK: dual-mode source leaves no residue"
           EOF
           ${{ matrix.shell }} "$RUNNER_TEMP/src_help.sh"
