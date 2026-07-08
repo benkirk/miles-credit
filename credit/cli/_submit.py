@@ -21,12 +21,17 @@ def _train(args: argparse.Namespace) -> None:
     main_cli()
 
 
-def _rollout(args: argparse.Namespace) -> None:
-    from credit.applications.rollout_to_netcdf_gen2 import main
+def _preprocess(args: argparse.Namespace) -> None:
+    from credit.applications.preprocess import main
 
-    argv = ["credit-rollout", "-c", args.config, "-m", args.mode, "-cpus", str(args.procs)]
-    if getattr(args, "ensemble_size", None) is not None:
-        argv += ["--ensemble-size", str(args.ensemble_size)]
+    sys.argv = ["credit-preprocess", "-c", args.config, "--backend", args.backend]
+    main()
+
+
+def _rollout(args: argparse.Namespace) -> None:
+    from credit.applications.rollout_gen2 import main
+
+    argv = ["credit-rollout", "-c", args.config, "-p", str(args.procs)]
     sys.argv = argv
     main()
 
@@ -401,6 +406,128 @@ def _build_realtime_pbs_script(
         """)
 
 
+def _build_preprocess_pbs_script(
+    args: argparse.Namespace,
+    config: str,
+    repo: str,
+    save_loc: str = None,
+) -> str:
+    """Return a PBS script that runs the preprocessing / scaler-fitting job."""
+    if save_loc:
+        logs_dir = os.path.join(os.path.expandvars(save_loc), "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        output_line = f"#PBS -o {logs_dir}"
+    else:
+        output_line = ""
+
+    job_name = getattr(args, "job_name", "credit_preprocess")
+
+    if args.cluster == "casper":
+        return textwrap.dedent(f"""\
+            #!/bin/bash -l
+            #PBS -N {job_name}
+            #PBS -l select=1:ncpus={args.cpus}:ngpus={args.gpus}:mem={args.mem}:gpu_type={args.gpu_type}
+            #PBS -l walltime={args.walltime}
+            #PBS -A {args.account}
+            #PBS -q {args.queue}
+            #PBS -j oe
+            #PBS -k eod
+            {output_line}
+
+            module load conda/latest
+
+            conda activate {args.conda_env}
+
+            REPO={repo}
+            CONFIG={config}
+            NGPUS={args.gpus}
+            TORCHRUN=$(which torchrun)
+
+            echo "Preprocessing — scaler fitting"
+            echo "Config  : ${{CONFIG}}"
+            echo "Node    : $(hostname)"
+            echo "GPUs    : ${{NGPUS}}"
+
+            ${{TORCHRUN}} --standalone --nnodes=1 --nproc-per-node=${{NGPUS}} \\
+                ${{REPO}}/credit/applications/preprocess.py -c ${{CONFIG}}
+        """)
+
+    else:  # derecho
+        return textwrap.dedent(f"""\
+            #!/bin/bash
+            #PBS -A {args.account}
+            #PBS -N {job_name}
+            #PBS -l walltime={args.walltime}
+            #PBS -l select=1:ncpus={args.cpus}:ngpus={args.gpus}:mem={args.mem}
+            #PBS -q {args.queue}
+            #PBS -j oe
+            #PBS -k eod
+            #PBS -r n
+            {output_line}
+
+            module load ncarenv/24.12 gcc/12.4.0 ncarcompilers craype cray-mpich/8.1.29 \\
+                        cuda/12.3.2 conda/latest
+
+            conda activate {args.conda_env}
+
+            REPO={repo}
+            CONFIG={config}
+            TORCHRUN={args.conda_env + "/bin/torchrun" if (args.conda_env and os.path.isdir(args.conda_env)) else _find_torchrun()}
+
+            echo "Preprocessing — scaler fitting"
+            echo "Config  : ${{CONFIG}}"
+
+            ${{TORCHRUN}} --standalone --nnodes=1 --nproc-per-node={args.gpus} \\
+                ${{REPO}}/credit/applications/preprocess.py -c ${{CONFIG}}
+        """)
+
+
+def _do_submit_preprocess(args: argparse.Namespace) -> None:
+    """Submit a single PBS job for preprocessing / scaler fitting."""
+    repo = _repo_root()
+    pbs_cfg = _load_pbs_config(args.config)
+
+    if not hasattr(args, "nodes"):
+        args.nodes = None
+    if not hasattr(args, "torchrun"):
+        args.torchrun = None
+
+    args = _resolve_pbs_opts(args, pbs_cfg)
+
+    with open(args.config) as f:
+        conf = yaml.safe_load(f)
+    save_loc = os.path.expandvars(conf.get("save_loc", "."))
+    config_abs = os.path.abspath(args.config)
+
+    sep = "=" * 52
+    logger.info(
+        "\n%s\n  Preprocess job plan\n%s\n"
+        "  Cluster   : %s\n"
+        "  Account   : %s\n"
+        "  Config    : %s\n"
+        "  GPUs      : %s\n"
+        "  Walltime  : %s\n"
+        "%s",
+        sep,
+        sep,
+        args.cluster,
+        args.account,
+        args.config,
+        args.gpus,
+        args.walltime,
+        sep,
+    )
+
+    script = _build_preprocess_pbs_script(args, config_abs, repo, save_loc=save_loc)
+
+    if args.dry_run:
+        print(script)
+        return
+
+    job_id = _qsub(script, save_loc=save_loc)
+    logger.info("Submitted: %s", job_id)
+
+
 def _do_submit_realtime(args: argparse.Namespace) -> None:
     """Submit a single PBS job for a realtime forecast."""
     repo = _repo_root()
@@ -457,6 +584,9 @@ def _do_submit_realtime(args: argparse.Namespace) -> None:
 def _submit(args: argparse.Namespace) -> None:
     """Generate and optionally submit PBS batch scripts, with optional chaining."""
     mode = getattr(args, "submit_mode", "train")
+    if mode == "preprocess":
+        _do_submit_preprocess(args)
+        return
     if mode == "rollout":
         _do_submit_rollout(args)
         return
@@ -526,6 +656,10 @@ def _build_rollout_pbs_script(
             #PBS -k eod
             {output_line}
 
+            module load conda/latest
+
+            conda activate {args.conda_env}
+
             REPO={repo}
             CONFIG={config}
             NGPUS={args.gpus}
@@ -536,8 +670,9 @@ def _build_rollout_pbs_script(
             echo "GPUs    : ${{NGPUS}}"
 
             {torchrun} --standalone --nnodes=1 --nproc-per-node=${{NGPUS}} \\
-                ${{REPO}}/credit/applications/rollout_to_netcdf_gen2.py \\
-                -c ${{CONFIG}} --subset {subset} --no_subset {n_subsets}
+                ${{REPO}}/credit/applications/rollout_gen2.py \\
+                -c ${{CONFIG}}
+                # -c ${{CONFIG}} --subset {subset} --no_subset {n_subsets}  # rollout_gen2.py does not support these flags yet
         """)
 
     else:  # derecho
@@ -566,15 +701,20 @@ def _build_rollout_pbs_script(
             echo "Config  : ${{CONFIG}}"
 
             ${{TORCHRUN}} --standalone --nnodes=1 --nproc-per-node={args.gpus} \\
-                ${{REPO}}/credit/applications/rollout_to_netcdf_gen2.py \\
-                -c ${{CONFIG}} --subset {subset} --no_subset {n_subsets}
+                ${{REPO}}/credit/applications/rollout_gen2.py \\
+                -c ${{CONFIG}}
+                # -c ${{CONFIG}} --subset {subset} --no_subset {n_subsets}  # rollout_gen2.py does not support these flags yet
         """)
 
 
-def _print_ensemble_rollout_plan(args: argparse.Namespace, n_jobs: int, n_forecasts: int, ensemble_size: int) -> None:
+def _print_ensemble_rollout_plan(args: argparse.Namespace, n_jobs: int, n_forecasts, ensemble_size) -> None:
     """Print a human-readable summary of an ensemble rollout submission."""
-    per_job = -(-n_forecasts // n_jobs)  # ceiling division
-    total_runs = n_forecasts * ensemble_size
+    if isinstance(n_forecasts, int):
+        per_job = -(-n_forecasts // n_jobs)  # ceiling division
+        total_runs = n_forecasts * ensemble_size if isinstance(ensemble_size, int) else "?"
+    else:
+        per_job = "?"
+        total_runs = "?"
 
     sep = "=" * 56
     logger.info(
@@ -645,14 +785,25 @@ def _do_submit_rollout(args: argparse.Namespace) -> None:
 
     n_jobs = args.jobs
 
+    conf = {}
     try:
-        from credit.forecast import load_forecasts
-
         with open(args.config) as f:
             conf = yaml.safe_load(f)
-        all_forecasts = load_forecasts(conf)
-        n_forecasts = len(all_forecasts)
-        ensemble_size = conf.get("predict", {}).get("ensemble_size", 1)
+
+        if "inference" in conf:
+            inf_conf = conf["inference"]
+            if inf_conf.get("run_mode", "batch") == "single":
+                n_forecasts = 1
+            else:
+                from credit.trainers.rollout_utils import batch_init_times
+
+                n_forecasts = len(batch_init_times(inf_conf["batch_forecast"]))
+            ensemble_size = inf_conf.get("ensemble_size", 1)
+        else:
+            from credit.forecast import load_forecasts
+
+            n_forecasts = len(load_forecasts(conf))
+            ensemble_size = conf.get("predict", {}).get("ensemble_size", 1)
     except Exception:
         n_forecasts = "?"
         ensemble_size = "?"
@@ -677,7 +828,9 @@ def _do_submit_rollout(args: argparse.Namespace) -> None:
         job_ids.append(job_id)
         logger.info("[%2d/%d] %s", i, n_jobs, job_id)
 
-    save_forecast = conf.get("predict", {}).get("save_forecast", "<save_forecast in config>")
+    save_forecast = conf.get("inference", {}).get("save_forecast") or conf.get("predict", {}).get(
+        "save_forecast", "<save_forecast in config>"
+    )
     logger.info(
         "\nSubmitted %d parallel rollout jobs.\nOutput will be written to: %s\nMonitor with:\n  qstat -u $USER",
         n_jobs,

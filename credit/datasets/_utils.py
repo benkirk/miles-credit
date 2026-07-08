@@ -11,13 +11,26 @@ from __future__ import annotations
 
 import bisect
 import cftime
-import os
 import re
 from datetime import datetime as dt_cls
 
 import pandas as pd
-import s3fs
 
+
+# Set of all recognised strftime codes — used for path-template detection
+_STRFTIME_CODES: frozenset[str] = frozenset(
+    {
+        "%Y",
+        "%y",
+        "%m",
+        "%d",
+        "%H",
+        "%M",
+        "%S",
+        "%j",
+        "%f",
+    }
+)
 
 # Maps strftime format codes to non-capturing regex fragments
 _STRFTIME_TO_REGEX: dict[str, str] = {
@@ -41,6 +54,53 @@ _STRFTIME_TO_FREQ: list[tuple[str, str]] = [
     ("%d", "D"),
     ("%m", "M"),
 ]
+
+
+def _path_template_to_glob(template: str) -> str:
+    """Replace strftime codes in *template* with ``*`` to produce a glob pattern.
+
+    Args:
+        template: Path string that may contain strftime codes, e.g.
+            ``"/data/%Y/%m/era5_*.nc"``.
+
+    Returns:
+        Glob-compatible pattern, e.g. ``"/data/*/*/era5_*.nc"``.
+    """
+    result = template
+    for code in _STRFTIME_CODES:
+        result = result.replace(code, "*")
+    return result
+
+
+def _extract_time_fmt(template: str) -> str:
+    """Extract the strftime format substring from a path template.
+
+    Returns the slice of *template* from the first strftime code to the end of
+    the last one, preserving any literal characters between them.
+
+    Example::
+
+        _extract_time_fmt("/data/%Y/%m/era5_*.nc")  # "%Y/%m"
+        _extract_time_fmt("/data/era5_%Y%m%d.nc")   # "%Y%m%d"
+
+    Args:
+        template: Path template containing at least one strftime code.
+
+    Returns:
+        The strftime format string (suitable for ``strptime``).
+    """
+    first_pos = len(template)
+    last_pos = 0
+    for code in _STRFTIME_CODES:
+        idx = 0
+        while True:
+            pos = template.find(code, idx)
+            if pos == -1:
+                break
+            first_pos = min(first_pos, pos)
+            last_pos = max(last_pos, pos + len(code))
+            idx = pos + 1
+    return template[first_pos:last_pos] if last_pos > 0 else template
 
 
 def _strftime_to_regex(fmt: str) -> re.Pattern:
@@ -80,6 +140,7 @@ def _infer_period_freq(fmt: str) -> str:
 def _map_files(
     file_list: list[str],
     time_fmt: str,
+    path_template: str | None = None,
 ) -> list[tuple[pd.Timestamp, pd.Timestamp, str]]:
     """Build a sorted list of ``(start, end, path)`` intervals.
 
@@ -88,34 +149,59 @@ def _map_files(
     format string) is used to extract the date from each filename's
     basename; ``pd.Period`` then determines the exact coverage window.
 
+    When *path_template* is supplied the regex is anchored to the position of
+    the strftime codes within the full template, preventing false matches when
+    literal digits appear before the date placeholder (e.g.
+    ``branch_1980_%Y_data.zarr`` where a bare ``\\d{4}`` would match ``1980``
+    instead of the actual year).
+
     Args:
         file_list: Sorted list of file paths returned by glob.
-        time_fmt: strftime format string, e.g. ``"%Y"``, ``"%Y%m%d-%H%M%S"``.
+        time_fmt: strftime format string extracted from the path template,
+            e.g. ``"%Y"``, ``"%Y/%m"``.
+        path_template: Original path template containing the strftime codes
+            (e.g. ``"/data/run_1980_%Y_output.zarr"``). When provided, the
+            full template is used to build an anchored regex so the date is
+            extracted from the correct position in each filename.
 
     Returns:
         List of ``(start, end, path)`` tuples sorted by start time.
 
     Raises:
-        ValueError: If *time_fmt* does not match the basename of any file
-            in *file_list*.
+        ValueError: If *time_fmt* does not match any file in *file_list*.
     """
     if len(file_list) == 1:
         return [(pd.Timestamp.min, pd.Timestamp.max, file_list[0])]
 
-    pattern = _strftime_to_regex(time_fmt)
+    if path_template is not None:
+        # Build a date-regex string from the time_fmt (without compiling yet)
+        date_pat = re.escape(time_fmt)
+        for code, repl in _STRFTIME_TO_REGEX.items():
+            date_pat = date_pat.replace(re.escape(code), repl)
+        # Escape the full template and splice the date portion in as a named
+        # capture group so the match is anchored to the right field.
+        anchored = re.escape(path_template).replace(re.escape(time_fmt), f"(?P<date>{date_pat})")
+        # Templates may also contain glob wildcards (e.g. "..._%Y*.zarr");
+        # re.escape made them literal, so translate them to their regex
+        # equivalents (glob * and ? never cross a path separator).
+        anchored = anchored.replace(re.escape("*"), r"[^/]*").replace(re.escape("?"), r"[^/]")
+        pattern = re.compile(anchored)
+        group_key: str | int = "date"
+    else:
+        pattern = _strftime_to_regex(time_fmt)
+        group_key = 0
+
     freq = _infer_period_freq(time_fmt)
 
     intervals: list[tuple[pd.Timestamp, pd.Timestamp, str]] = []
     for f in file_list:
-        basename = os.path.basename(f)
-        m = pattern.search(basename)
+        m = pattern.search(f)
         if m is None:
             raise ValueError(
-                f"filename_time_format '{time_fmt}' did not match "
-                f"filename '{basename}'. Verify that the format matches "
-                "the date portion of your filenames."
+                f"Time format '{time_fmt}' did not match path '{f}'. "
+                "Verify that your path contains strftime codes covering the date portion."
             )
-        parsed = dt_cls.strptime(m.group(0), time_fmt)
+        parsed = dt_cls.strptime(m.group(group_key), time_fmt)
         period = pd.Period(parsed, freq)
         intervals.append((period.start_time, period.end_time, f))
 
@@ -167,7 +253,7 @@ def _to_cftime(ts: pd.Timestamp, calendar: str) -> cftime.datetime:
     )
 
 
-def _start_s3_fs() -> s3fs.S3FileSystem:
+def _start_s3_fs():
     """Lazily initialize an anonymous ``s3fs.S3FileSystem`` instance.
 
     Called automatically on the first ``__extract_field__`` (called within ``__getitem__``)
@@ -176,6 +262,10 @@ def _start_s3_fs() -> s3fs.S3FileSystem:
 
     """
 
+    try:
+        import s3fs
+    except ImportError as exc:
+        raise ImportError("s3fs is required for remote dataset access. Install it with: pip install s3fs") from exc
     fs_config = {
         "anon": True,
         "token": "anon",
