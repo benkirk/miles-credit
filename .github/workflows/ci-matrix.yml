@@ -1,0 +1,69 @@
+name: CI env matrix
+
+# Tests the CREDIT *source code* across a python x torch x backend matrix by
+# building a real env for each combination and running pytest in it. This is the
+# version-coverage counterpart to ci-config-env.yml (which tests the installer
+# SCRIPT itself); both share the ./.github/actions/build-credit-env composite
+# action. The torch axis is genuinely exercised: each leg passes --torch-version
+# with NO --cuda-version, so versions_config.sh pins the CPU build (torch==<ver>)
+# from PyPI and the action's "Verify pinned torch version" step asserts it took.
+#
+# Scope kept deliberately portable: linux-amd64 + bash only (the OS/arch/shell
+# breadth lives in ci-config-env.yml). The `--rebuild` leg is skipped here
+# (ci-config-env.yml already exercises it); pipdeptree introspection IS run so
+# each leg surfaces the RESOLVED versions (torch, torchvision, numpy, ...) for
+# its python×torch combo. So each leg is build -> activate -> source ->
+# verify-torch -> introspect -> pytest.
+# Honest by design: a (python, torch) combo with no matching CPU wheel (or a
+# torchvision lag) goes red; fail-fast is off so one red leg never masks the
+# rest. Unlike ci-config-env.yml this runs on ANY PR to main/staging (no paths
+# filter), since a source change can break a version combo without touching
+# envs/.
+
+on:
+  pull_request:
+    branches: [main, staging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix-build:
+    name: ${{ matrix.backend }} / py${{ matrix.python }} / torch${{ matrix.torch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Quote every value so YAML does not coerce 3.10/2.10.0 to floats or
+        # strip trailing zeros. Python floor is 3.11 (pyproject requires-python).
+        python: ['3.11', '3.12', '3.13']
+        torch: ['2.10.0', '2.11.0']
+        # Only conda/uv here: they PROVISION the requested python, so the sweep is
+        # meaningful.  venv ADOPTS the runner's python3 and hard-fails a mismatched
+        # --python-version, so a forced python sweep cannot apply to it; the venv
+        # backend is exercised in ci-config-env.yml's full-build matrix instead.
+        backend: [conda, uv]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build + test the CREDIT env
+        uses: ./.github/actions/build-credit-env
+        with:
+          backend: ${{ matrix.backend }}
+          shell: bash
+          python-version: ${{ matrix.python }}
+          torch-version: ${{ matrix.torch }}
+          rebuild: 'false'
+          # introspect ON: pipdeptree shows the RESOLVED versions (torch,
+          # torchvision, numpy, ...) per python×torch leg -- the useful payoff of
+          # the matrix. The --rebuild leg stays off (ci-config-env covers it).
+          introspect: 'true'
+          run-tests: 'true'

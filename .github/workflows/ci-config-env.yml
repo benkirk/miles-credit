@@ -1,0 +1,223 @@
+name: CI config_env.sh installer
+
+# Exercises envs/config_env.sh across OS/arch and shells. The script's contract
+# is: dual-mode (runnable OR sourceable), bash + zsh, idempotent activate, smart
+# --rebuild, and ZERO shell-state pollution when sourced. We run the script
+# exactly as-is (no script changes); the heavy `full-build` legs (one per
+# backend -- conda and uv -- via the matrix) report reality, so they may be red
+# where the scientific stack (pygrib/eccodes) or the GPU-only torch.cuda.nccl
+# check cannot succeed on a CPU runner.
+#
+# The `matrix` context is NOT permitted in a step's `shell:` field, so every
+# step runs under `shell: bash` and we invoke the shell-under-test from inside
+# the run block (matrix IS allowed there):
+#   - execute mode -> `<shell> envs/config_env.sh ...` (a child process; the
+#     bash shebang is bypassed so the matrix shell genuinely parses the script).
+#   - source mode  -> write the body to a temp script and run `<shell> body.sh`,
+#     which sources config_env.sh; sourced-mode detection fires in both shells.
+# The temp scripts deliberately run WITHOUT `set -e`: config_env.sh is meant to
+# be sourced into a normal (no -e) shell (e.g. `__ce_run_quiet module try-load
+# conda` returns 127 on a non-module host), so -e would spuriously abort it.
+
+on:
+  pull_request:
+    branches: [staging, main]
+    paths:
+      - 'envs/**'
+      - 'pyproject.toml'
+      - '.github/workflows/ci-config-env.yml'
+      - '.github/actions/build-credit-env/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Fast, deterministic, conda-free. The --help / bad-arg / syntax / source
+  # paths all return before __ce_ensure_conda is ever reached, so these need no
+  # conda and give a stable green signal independent of the scientific stack.
+  # --------------------------------------------------------------------------
+  contract:
+    name: contract / ${{ matrix.os }} / ${{ matrix.shell }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        shell: [bash, zsh]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zsh (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Syntax check (bash -n and zsh -n)
+        run: |
+          # config_env.sh + versions_config.sh are sourced under bash AND zsh.
+          bash -n envs/config_env.sh
+          zsh  -n envs/config_env.sh
+          bash -n envs/versions_config.sh
+          zsh  -n envs/versions_config.sh
+          # create_env.sh is execute-only (a bash subprocess), like
+          # build-aws-ofi-nccl-plugin.sh -> bash-only.
+          bash -n envs/create_env.sh
+
+      - name: "--help (execute under ${{ matrix.shell }})"
+        run: |
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh --help 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: --help rc=$rc (want 0)"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Usage:' || { echo "FAIL: no usage text"; exit 1; }
+          echo "OK: --help"
+
+      - name: "--uv --help (execute under ${{ matrix.shell }})"
+        run: |
+          # --uv is parsed before any backend work; --help still short-circuits.
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh --uv --help 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: --uv --help rc=$rc (want 0)"; exit 1; }
+          printf '%s\n' "$out" | grep -q -- '--uv' || { echo "FAIL: no --uv in usage"; exit 1; }
+          echo "OK: --uv --help"
+
+      - name: "--venv --help (execute under ${{ matrix.shell }})"
+        run: |
+          # --venv is parsed before any backend work; --help short-circuits BEFORE
+          # the python resolution, so this is a pure arg-parse check (no python3
+          # query).
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh --venv --help 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: --venv --help rc=$rc (want 0)"; exit 1; }
+          printf '%s\n' "$out" | grep -q -- '--venv' || { echo "FAIL: no --venv in usage"; exit 1; }
+          echo "OK: --venv --help"
+
+      - name: "Bad argument (execute under ${{ matrix.shell }})"
+        run: |
+          # help/bad-arg map to status 2 -> the driver returns/exits 0.
+          set +e
+          out=$(${{ matrix.shell }} envs/config_env.sh --bogus 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL: bad-arg rc=$rc (want 0, mapped)"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'unknown argument' \
+            || { echo "FAIL: no 'unknown argument' message"; exit 1; }
+          echo "OK: bad argument"
+
+      - name: "--python-version parsing (execute under ${{ matrix.shell }})"
+        run: |
+          set +e
+          # A valid value (both forms) still short-circuits on --help -> rc 0.
+          for a in "--python-version 3.12 --help" "--python-version=3.12 --help"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0)"; printf '%s\n' "$out"; exit 1; }
+          done
+          # Missing value: bare trailing flag, and a swallowed following flag.
+          for a in "--python-version" "--python-version --uv"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            set -e
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0, mapped)"; printf '%s\n' "$out"; exit 1; }
+            printf '%s\n' "$out" | grep -q 'missing value' \
+              || { echo "FAIL: '$a' did not report missing value"; printf '%s\n' "$out"; exit 1; }
+            set +e
+          done
+          set -e
+          echo "OK: --python-version parsing"
+
+      - name: "--torch-version / --cuda-version parsing (execute under ${{ matrix.shell }})"
+        run: |
+          set +e
+          # Valid values (both forms, both flags) still short-circuit on --help.
+          for a in "--torch-version 2.10.0 --help" "--torch-version=2.10.0 --help" \
+                   "--cuda-version 12.6 --help"     "--cuda-version=12.9 --help"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0)"; printf '%s\n' "$out"; exit 1; }
+          done
+          # Missing value: bare trailing flag, and a swallowed following flag.
+          for a in "--torch-version" "--torch-version --uv" "--cuda-version" "--cuda-version --uv"; do
+            out=$(${{ matrix.shell }} envs/config_env.sh $a 2>&1); rc=$?
+            set -e
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$a' rc=$rc (want 0, mapped)"; printf '%s\n' "$out"; exit 1; }
+            printf '%s\n' "$out" | grep -q 'missing value' \
+              || { echo "FAIL: '$a' did not report missing value"; printf '%s\n' "$out"; exit 1; }
+            set +e
+          done
+          set -e
+          echo "OK: --torch-version / --cuda-version parsing"
+
+      - name: "Source + dual-mode + no shell pollution (${{ matrix.shell }})"
+        run: |
+          # --help returns before any build/conda work, so this isolates the
+          # sourceable dual-mode + cleanup contract from the heavy build.
+          cat > "$RUNNER_TEMP/src_help.sh" <<'EOF'
+          source envs/config_env.sh --help; rc=$?
+          [ "$rc" -eq 0 ] || { echo "FAIL: source --help rc=$rc (want 0)"; exit 1; }
+          # Catch-all: NOTHING the script defines may survive in the caller shell.
+          # Everything it owns carries a prefix (vars __ce_*/__CE_*/CREDIT_*; funcs
+          # __ce_*), and __ce_cleanup wipes them by glob -- so we VERIFY by the same
+          # glob rather than an enumerated list (which silently misses any new name
+          # nobody added).  CONDA_PREFIX/VIRTUAL_ENV/PIP_NO_BINARY don't match these
+          # prefixes, so they are correctly ignored.  Enumeration syntax differs per
+          # shell; this temp script is run under the shell-under-test.
+          if [ -n "${ZSH_VERSION:-}" ]; then
+            leak="${(k)parameters[(I)(__ce_*|__CE_*|CREDIT_*)]} ${(k)functions[(I)__ce_*]}"
+          else
+            # `|| true`: compgen returns 1 when NOTHING matches (the clean case),
+            # which would abort the `leak=$(...)` assignment if errexit is active
+            # (conda activation can leave `set -e` on in the sourcing shell).
+            leak="$( { for v in ${!__ce_@} ${!__CE_@} ${!CREDIT_@}; do echo "$v"; done
+                       compgen -A function __ce_; } 2>/dev/null || true )"
+          fi
+          if [ -n "${leak// /}" ]; then echo "FAIL: leaked owned-prefix names: $leak"; exit 1; fi
+          echo "OK: dual-mode source leaves no residue"
+          EOF
+          ${{ matrix.shell }} "$RUNNER_TEMP/src_help.sh"
+
+  # --------------------------------------------------------------------------
+  # Heavy: builds the real environment and exercises the runtime permutations
+  # (fresh build, idempotent activate, source-activate, --rebuild) plus
+  # pipdeptree + pytest in the built env. The whole body lives in the reusable
+  # composite action ./.github/actions/build-credit-env (shared with
+  # ci-matrix.yml); ONE parameterized job covers BOTH backends via
+  # `matrix.backend` (conda and uv). Honest by design: a leg goes red wherever
+  # the real build cannot complete. uv is provided on PATH by the action (the
+  # script never bootstraps it), matching how Casper exposes uv via a module.
+  # derecho's extra build steps need Cray modules/hardware that free CI lacks,
+  # so this portable leg uses `default`. Every input but backend/shell is left
+  # at its default (python 3.11, no torch/cuda pin, rebuild + introspect +
+  # run-tests all on) so this job's behavior is exactly as before the action
+  # extraction.
+  # --------------------------------------------------------------------------
+  full-build:
+    name: build / ${{ matrix.backend }} / ${{ matrix.os }} / ${{ matrix.shell }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        shell: [bash, zsh]
+        backend: [conda, uv, venv]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build + exercise the CREDIT env
+        uses: ./.github/actions/build-credit-env
+        with:
+          backend: ${{ matrix.backend }}
+          shell: ${{ matrix.shell }}

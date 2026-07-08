@@ -7,8 +7,11 @@ on:
 permissions:
   contents: read
 
-jobs: 
-  build: 
+jobs:
+  build:
+    # The self-hosted runner and AWS_* secrets exist only in the upstream repo,
+    # so on forks this job would queue forever. Skip it anywhere but upstream.
+    if: github.repository == 'NCAR/miles-credit'
     runs-on: gha-runner-miles-credit1
     container:
       image: docker.io/sgpearse/cirrustest:1.3.20.root.1

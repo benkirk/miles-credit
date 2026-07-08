@@ -1,0 +1,285 @@
+name: Build + exercise the CREDIT env
+description: >
+  Build a CREDIT environment via envs/config_env.sh for ONE backend/shell and
+  exercise the runtime permutations (fresh build, idempotent activate,
+  source-activate + no shell pollution), then optionally --rebuild, verify a
+  pinned torch version, run pipdeptree introspection, and run pytest in the
+  built env.  This is the heavy `full-build` body of ci-config-env.yml lifted
+  into a reusable action so it can also drive the python x torch version matrix
+  in ci-matrix.yml.  The CALLER must check out the repo first (the action is
+  referenced as ./.github/actions/build-credit-env, so the repo tree must
+  already be present).
+
+# All inputs are STRINGS (GitHub Actions has no typed inputs for composite
+# actions); booleans are the literals 'true'/'false' and gated with == 'true'.
+inputs:
+  backend:
+    description: "packaging backend: 'conda' or 'uv'"
+    default: 'conda'
+  shell:
+    description: "shell-under-test the script is parsed by: 'bash' or 'zsh'"
+    default: 'bash'
+  python-version:
+    description: >
+      Python to build (threaded to --python-version for conda/uv).  IGNORED for
+      the venv backend, which adopts the runner's python3; the resolved version
+      is always folded into the env's SHA prefix regardless of backend.
+    default: '3.11'
+  torch-version:
+    description: "optional torch pin (--torch-version); empty => unpinned (pyproject resolves it)"
+    default: ''
+  cuda-version:
+    description: >
+      optional CUDA build (--cuda-version).  The sentinel 'disabled' means DO
+      NOT pass the flag -> CPU/default behavior.  Any real value (e.g. '12.6')
+      is forwarded -- reserved for a future GPU runner leg.
+    default: 'disabled'
+  rebuild:
+    description: "run the --rebuild leg ('true'/'false')"
+    default: 'true'
+  introspect:
+    description: "run pipdeptree introspection ('true'/'false')"
+    default: 'true'
+  run-tests:
+    description: "run pytest in the built env ('true'/'false')"
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # zsh is only needed when it is the shell-under-test; the bash legs skip the
+    # apt install.  (matrix is NOT visible inside a composite action, so we gate
+    # on inputs.shell + runner.os, both of which ARE available here.)
+    - name: Install zsh (Linux)
+      if: inputs.shell == 'zsh' && runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y zsh
+
+    # venv ADOPTS the python3 on PATH (it does not provision one), so in CI we put
+    # a KNOWN interpreter there rather than depend on the runner image's drifting
+    # default python3 -- which varies by OS/image and may be a version the
+    # scientific stack has no wheels for (e.g. a macOS python3 newer than the
+    # conda/uv leg's 3.11).  This makes the venv leg test venv MECHANICS against a
+    # controlled python.  Must run BEFORE "Derive backend / arg vars" so
+    # --print-env-dir resolves (and the later build adopts) this same interpreter.
+    - name: Set up Python (venv backend)
+      if: inputs.backend == 'venv'
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # Single source of truth for the per-leg differences, written to $GITHUB_ENV
+    # so the later steps (and any caller step) read them as plain $CE_* vars:
+    #   CE_ARGS   - the config_env.sh flags assembled from the version inputs
+    #   CE_ENV    - the env-dir basename we assert on
+    #   CE_MARKER - the activation marker the source-activate check inspects
+    # The python version is passed for conda/uv (which provision it); venv adopts
+    # the interpreter the setup-python step above placed on PATH, so it is NOT
+    # passed there (a mismatch would be a hard error).  The prefix is a content
+    # hash (<backend>-credit-env[-host]-<sha>), so CI can no longer predict it: we
+    # ask the script via --print-env-dir (resolve-only; for venv this resolves the
+    # PATH python, so it must run after setup-python) and take the basename.
+    - name: Derive backend / arg vars
+      shell: bash
+      run: |
+        ARGS=""
+        case "${{ inputs.backend }}" in
+          uv)   ARGS="$ARGS --uv" ;;
+          venv) ARGS="$ARGS --venv" ;;
+        esac
+        # venv ADOPTS the runner's python3 (and FAILS if --python-version asks for
+        # a different one), so we must NOT pin a version for it; conda/uv build the
+        # requested version and get the pin.
+        [ "${{ inputs.backend }}" = venv ] || ARGS="$ARGS --python-version ${{ inputs.python-version }}"
+        [ -n "${{ inputs.torch-version }}" ] && ARGS="$ARGS --torch-version ${{ inputs.torch-version }}"
+        # 'disabled' sentinel => no --cuda-version (CPU/default). A real value is
+        # forwarded (reserved for a future GPU runner leg).
+        if [ "${{ inputs.cuda-version }}" != disabled ] && [ -n "${{ inputs.cuda-version }}" ]; then
+          ARGS="$ARGS --cuda-version ${{ inputs.cuda-version }}"
+        fi
+        ENV_DIR=$(bash envs/config_env.sh $ARGS --print-env-dir) \
+          || { echo "FAIL: --print-env-dir returned non-zero"; exit 1; }
+        ENV=$(basename "$ENV_DIR")
+        case "${{ inputs.backend }}" in
+          uv|venv) MARKER=VIRTUAL_ENV ;;
+          *)       MARKER=CONDA_PREFIX ;;
+        esac
+        { echo "CE_ARGS=$ARGS"; echo "CE_ENV=$ENV"; echo "CE_MARKER=$MARKER"; } >> "$GITHUB_ENV"
+
+    - name: Set up conda (Miniforge)
+      if: inputs.backend == 'conda'
+      uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
+      with:
+        miniforge-version: latest
+        auto-activate: true
+        activate-environment: base
+        conda-remove-defaults: true
+
+    - name: Put conda on PATH for every shell
+      if: inputs.backend == 'conda'
+      shell: bash -el {0}
+      run: |
+        base=$(conda info --base)
+        echo "$base/condabin" >> "$GITHUB_PATH"
+        echo "$base/bin"      >> "$GITHUB_PATH"
+
+    - name: Install uv (on PATH)
+      if: inputs.backend == 'uv'
+      shell: bash
+      run: |
+        # The standalone installer needs no pinned third-party action and works
+        # on Linux + macOS runners.
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: "Execute: fresh build"
+      shell: bash
+      run: |
+        if ! ${{ inputs.shell }} envs/config_env.sh $CE_ARGS; then
+          echo "FAIL: fresh build returned non-zero"; exit 1
+        fi
+        test -d "envs/$CE_ENV" || { echo "FAIL: envs/$CE_ENV not created"; exit 1; }
+        echo "OK: fresh build"
+
+    - name: "Execute: idempotent activate (no rebuild)"
+      shell: bash
+      run: |
+        set +e
+        out=$(${{ inputs.shell }} envs/config_env.sh $CE_ARGS 2>&1); rc=$?
+        set -e
+        printf '%s\n' "$out"
+        [ "$rc" -eq 0 ] || { echo "FAIL: re-run rc=$rc"; exit 1; }
+        # grep a here-string, NOT `printf "$out" | grep -q`: with GitHub's
+        # `shell: bash` (-o pipefail), grep -q closes the pipe on first match and
+        # printf dies with SIGPIPE/"write error: Broken pipe" on a large $out ->
+        # pipefail makes the matching pipeline report FAILURE. The here-string
+        # has no pipe, so it cannot false-negative.
+        grep -q 'Activating' <<<"$out" \
+          || { echo "FAIL: expected 'Activating' (activate short-circuit)"; exit 1; }
+        if grep -q 'successfully installed' <<<"$out"; then
+          echo "FAIL: rebuilt instead of activating an existing env"; exit 1
+        fi
+        echo "OK: idempotent activate"
+
+    - name: "Source: activate marker + no pollution"
+      shell: bash
+      run: |
+        # CE_ENV/CE_MARKER are in $GITHUB_ENV, so they reach the temp script the
+        # matrix shell runs.  CE_ARGS must NOT be expanded INSIDE the temp script
+        # though: zsh does not word-split an unquoted $CE_ARGS (bash does), so a
+        # multi-token value like "--python-version 3.11" would arrive as a single
+        # bogus argument under zsh.  Instead we let THIS bash run block word-split
+        # $CE_ARGS and pass the tokens as positional args; the script uses "$@",
+        # which expands correctly in BOTH bash and zsh.  The marker is resolved
+        # indirectly so one check covers both CONDA_PREFIX and VIRTUAL_ENV.
+        cat > "$RUNNER_TEMP/src_activate.sh" <<'EOF'
+        source envs/config_env.sh "$@"; rc=$?
+        [ "$rc" -eq 0 ] || { echo "FAIL: source rc=$rc"; exit 1; }
+        eval "marker_val=\${$CE_MARKER}"
+        case "$marker_val" in
+          */envs/$CE_ENV) echo "OK: $CE_MARKER=$marker_val" ;;
+          *) echo "FAIL: $CE_MARKER not the env: '$marker_val'"; exit 1 ;;
+        esac
+        # Catch-all leak scan by owned prefix (same globs __ce_cleanup uses), not
+        # an enumerated list -- catches ANY __ce_*/__CE_*/CREDIT_* var or __ce_*
+        # function that leaks.  The activation marker ($CE_MARKER above, i.e.
+        # CONDA_PREFIX/VIRTUAL_ENV) is NOT an owned prefix, so it correctly survives.
+        if [ -n "${ZSH_VERSION:-}" ]; then
+          leak="${(k)parameters[(I)(__ce_*|__CE_*|CREDIT_*)]} ${(k)functions[(I)__ce_*]}"
+        else
+          # `|| true`: compgen returns 1 when NOTHING matches (the clean case),
+          # which would abort the `leak=$(...)` assignment if errexit is active
+          # (conda activation can leave `set -e` on in the sourcing shell).
+          leak="$( { for v in ${!__ce_@} ${!__CE_@} ${!CREDIT_@}; do echo "$v"; done
+                     compgen -A function __ce_; } 2>/dev/null || true )"
+        fi
+        if [ -n "${leak// /}" ]; then echo "FAIL: leaked owned-prefix names: $leak"; exit 1; fi
+        echo "OK: source-activate leaves no residue"
+        EOF
+        ${{ inputs.shell }} "$RUNNER_TEMP/src_activate.sh" $CE_ARGS
+
+    - name: "Execute: rebuild (-r)"
+      if: inputs.rebuild == 'true'
+      shell: bash
+      run: |
+        set +e
+        out=$(${{ inputs.shell }} envs/config_env.sh $CE_ARGS -r 2>&1); rc=$?
+        set -e
+        printf '%s\n' "$out"
+        [ "$rc" -eq 0 ] || { echo "FAIL: rebuild rc=$rc"; exit 1; }
+        # here-string, not `printf | grep -q`: the rebuild $out is large (full
+        # conda create log) and 'Rebuild requested' matches at the top, so the
+        # piped form SIGPIPEs printf and pipefail reports a false FAIL. See the
+        # idempotent-activate step for the full rationale.
+        grep -q 'Rebuild requested' <<<"$out" \
+          || { echo "FAIL: expected 'Rebuild requested'"; exit 1; }
+        test -d "envs/$CE_ENV" || { echo "FAIL: env missing after rebuild"; exit 1; }
+        echo "OK: rebuild"
+
+    - name: "Verify pinned torch version"
+      if: inputs.torch-version != ''
+      shell: bash
+      run: |
+        # The whole point of the version matrix: prove --torch-version actually
+        # took.  probe_installed_env.py reports the version during the build but
+        # does not assert a specific one (the script stays unopinionated), so we
+        # assert here.  Strip any +cuXXX local tag before comparing.
+        P="$GITHUB_WORKSPACE/envs/$CE_ENV"
+        # uv and venv expose the interpreter at $P/bin/python; only conda needs
+        # `conda run`.
+        if [ "${{ inputs.backend }}" = conda ]; then
+          in_env() { conda run --no-capture-output -p "$P" python "$@"; }
+        else
+          in_env() { "$P/bin/python" "$@"; }
+        fi
+        want='${{ inputs.torch-version }}'
+        in_env -c "import torch,sys; got=torch.__version__.split('+')[0]; \
+          print('torch:', torch.__version__); \
+          sys.exit(0 if got=='$want' else 1)" \
+          || { echo "FAIL: installed torch != $want"; exit 1; }
+        echo "OK: torch == $want"
+
+    - name: "Inspect (pipdeptree) in the built env"
+      if: inputs.introspect == 'true'
+      shell: bash
+      run: |
+        # CI-only tooling, installed INTO the built env at CI time -- NOT added
+        # to config_env.sh or pyproject.toml (the env is kept intentionally
+        # minimal).  conda has `conda run` + pip; a uv venv has neither, so we
+        # target its python via `uv pip --python` and invoke the venv's bin/.
+        P="$GITHUB_WORKSPACE/envs/$CE_ENV"
+        case "${{ inputs.backend }}" in
+          uv)
+            uv pip install --python "$P/bin/python" pipdeptree
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          venv)
+            "$P/bin/pip" install pipdeptree
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          conda)
+            conda run -p "$P" pip install pipdeptree
+            in_env() { conda run --no-capture-output -p "$P" "$@"; } ;;
+        esac
+        echo "::group::pipdeptree --depth 3"; in_env pipdeptree --depth 3; echo "::endgroup::"
+
+    - name: "Test (pytest) in the built env"
+      if: inputs.run-tests == 'true'
+      shell: bash
+      env:
+        # Skip the tests that reach real AWS S3 (HRRR remote fetch) so the suite
+        # stays hermetic and non-flaky on CI runners.  Multi-GPU/NCCL tests
+        # self-skip on CPU (torch.cuda.device_count() < 2).
+        SKIP_HRRR_REMOTE: "1"
+      run: |
+        P="$GITHUB_WORKSPACE/envs/$CE_ENV"
+        case "${{ inputs.backend }}" in
+          uv)
+            uv pip install --python "$P/bin/python" pytest
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          venv)
+            "$P/bin/pip" install pytest
+            in_env() { local t="$1"; shift; "$P/bin/$t" "$@"; } ;;
+          conda)
+            conda run -p "$P" pip install pytest
+            in_env() { conda run --no-capture-output -p "$P" "$@"; } ;;
+        esac
+        echo "::group::pytest tests/"; in_env pytest tests/; echo "::endgroup::"
