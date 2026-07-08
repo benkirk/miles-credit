@@ -25,5 +25,5 @@ h5py<=3.14.0
 h5netcdf
 torchmetrics
 s3fs
-numba
+numba>=0.61  # py3.12/3.13: avoid resolver backtrack to numba 0.53.1 (llvmlite 0.36 won't build); see pyproject.toml
 fastapi
