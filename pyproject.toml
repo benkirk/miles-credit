@@ -40,7 +40,11 @@ dependencies = [
     "s3fs",
     "setuptools_scm",
     "setuptools",
-    "numba",
+    # Floor keeps the resolver from backtracking to numba 0.53.1 on py>=3.12:
+    # newer numpy (>=2.5) has no py3.12/3.13-capable numba that accepts it, so
+    # uv/pip fall back to 0.53.1 whose llvmlite 0.36 refuses to build on py>=3.10.
+    # 0.61 is the first release with py3.13 support; it pins numpy back into range.
+    "numba>=0.61",
     "tensorboard",
     "fastapi",
     "overrides"
